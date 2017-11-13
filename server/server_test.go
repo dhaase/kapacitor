@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,10 +33,14 @@ import (
 	"github.com/influxdata/kapacitor/command/commandtest"
 	"github.com/influxdata/kapacitor/models"
 	"github.com/influxdata/kapacitor/server"
-	alertservice "github.com/influxdata/kapacitor/services/alert"
 	"github.com/influxdata/kapacitor/services/alert/alerttest"
 	"github.com/influxdata/kapacitor/services/alerta/alertatest"
 	"github.com/influxdata/kapacitor/services/hipchat/hipchattest"
+	"github.com/influxdata/kapacitor/services/httppost"
+	"github.com/influxdata/kapacitor/services/httppost/httpposttest"
+	"github.com/influxdata/kapacitor/services/k8s"
+	"github.com/influxdata/kapacitor/services/mqtt"
+	"github.com/influxdata/kapacitor/services/mqtt/mqtttest"
 	"github.com/influxdata/kapacitor/services/opsgenie"
 	"github.com/influxdata/kapacitor/services/opsgenie/opsgenietest"
 	"github.com/influxdata/kapacitor/services/pagerduty"
@@ -44,6 +50,7 @@ import (
 	"github.com/influxdata/kapacitor/services/slack/slacktest"
 	"github.com/influxdata/kapacitor/services/smtp/smtptest"
 	"github.com/influxdata/kapacitor/services/snmptrap/snmptraptest"
+	"github.com/influxdata/kapacitor/services/swarm"
 	"github.com/influxdata/kapacitor/services/talk/talktest"
 	"github.com/influxdata/kapacitor/services/telegram"
 	"github.com/influxdata/kapacitor/services/telegram/telegramtest"
@@ -337,6 +344,259 @@ func TestServer_CreateTask(t *testing.T) {
 		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, tick)
 	}
 	dot := "digraph testTaskID {\nstream0 -> from1;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+}
+
+func TestServer_CreateTaskImplicitStream(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testTaskID"
+	dbrps := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+		{
+			Database:        "otherdb",
+			RetentionPolicy: "default",
+		},
+	}
+	tick := `dbrp "mydb"."myrp"
+
+dbrp "otherdb"."default"
+
+stream
+    |from()
+        .measurement('test')
+`
+	task, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti, err := cli.Task(task.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.StreamTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.StreamTask)
+	}
+	if ti.Status != client.Disabled {
+		t.Fatalf("unexpected status got %v exp %v", ti.Status, client.Disabled)
+	}
+	if !reflect.DeepEqual(ti.DBRPs, dbrps) {
+		t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, dbrps)
+	}
+	if ti.TICKscript != tick {
+		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, tick)
+	}
+	dot := "digraph testTaskID {\nstream0 -> from1;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+}
+
+func TestServer_CreateTaskBatch(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testTaskID"
+	dbrps := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+	}
+	tick := `dbrp "mydb"."myrp"
+
+batch
+    |query('SELECT * from mydb.myrp.mymeas')
+    |log()
+`
+	task, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti, err := cli.Task(task.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.BatchTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.BatchTask)
+	}
+	if ti.Status != client.Disabled {
+		t.Fatalf("unexpected status got %v exp %v", ti.Status, client.Disabled)
+	}
+	if !reflect.DeepEqual(ti.DBRPs, dbrps) {
+		t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, dbrps)
+	}
+	if ti.TICKscript != tick {
+		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, tick)
+	}
+	dot := "digraph testTaskID {\nquery1 -> log2;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+}
+
+func TestServer_CreateTaskImplicitAndExplicit(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testTaskID"
+	dbrps := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+	}
+	tick := `dbrp "mydb"."myrp"
+
+dbrp "otherdb"."default"
+
+stream
+    |from()
+        .measurement('test')
+`
+	_, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		DBRPs:      dbrps,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	})
+
+	// It is expected that error should be non nil
+	if err == nil {
+		t.Fatal("expected task to fail to be created")
+	}
+}
+
+func TestServer_CreateTaskExplicitUpdateImplicit(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testTaskID"
+	createDBRPs := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+		{
+			Database:        "otherdb",
+			RetentionPolicy: "default",
+		},
+	}
+	createTick := `stream
+    |from()
+        .measurement('test')
+`
+	updateDBRPs := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+	}
+	updateTick := `dbrp "mydb"."myrp"
+
+stream
+    |from()
+        .measurement('test')
+`
+	task, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		DBRPs:      createDBRPs,
+		TICKscript: createTick,
+		Status:     client.Disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti, err := cli.Task(task.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.StreamTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.StreamTask)
+	}
+	if ti.Status != client.Disabled {
+		t.Fatalf("unexpected status got %v exp %v", ti.Status, client.Disabled)
+	}
+	if !reflect.DeepEqual(ti.DBRPs, createDBRPs) {
+		t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, createDBRPs)
+	}
+	if ti.TICKscript != createTick {
+		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, createTick)
+	}
+	dot := "digraph testTaskID {\nstream0 -> from1;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+
+	_, err = cli.UpdateTask(task.Link, client.UpdateTaskOptions{
+		TICKscript: updateTick,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti, err = cli.Task(task.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.StreamTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.StreamTask)
+	}
+	if ti.Status != client.Disabled {
+		t.Fatalf("unexpected status got %v exp %v", ti.Status, client.Disabled)
+	}
+	if !reflect.DeepEqual(ti.DBRPs, updateDBRPs) {
+		t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, updateDBRPs)
+	}
+	if ti.TICKscript != updateTick {
+		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, updateTick)
+	}
+	dot = "digraph testTaskID {\nstream0 -> from1;\n}"
 	if ti.Dot != dot {
 		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
 	}
@@ -1009,6 +1269,139 @@ stream
 	}
 	if !reflect.DeepEqual(vars, ti.Vars) {
 		t.Fatalf("unexpected vars\ngot\n%s\nexp\n%s\n", ti.Vars, vars)
+	}
+}
+
+func TestServer_CreateTemplateImplicitAndUpdateExplicitWithTasks(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testTemplateID"
+	implicitTick := `dbrp "telegraf"."autogen"
+
+var x = 5
+
+stream
+    |from()
+        .measurement('test')
+`
+	template, err := cli.CreateTemplate(client.CreateTemplateOptions{
+		ID:         id,
+		TICKscript: implicitTick,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ti, err := cli.Template(template.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.StreamTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.StreamTask)
+	}
+	if ti.TICKscript != implicitTick {
+		t.Fatalf("unexpected TICKscript got\n%s\nexp\n%s\n", ti.TICKscript, implicitTick)
+	}
+	dot := "digraph testTemplateID {\nstream0 -> from1;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+	vars := client.Vars{"x": {Value: int64(5), Type: client.VarInt}}
+	if !reflect.DeepEqual(vars, ti.Vars) {
+		t.Fatalf("unexpected vars\ngot\n%s\nexp\n%s\n", ti.Vars, vars)
+	}
+
+	implicitDBRPs := []client.DBRP{
+		{
+			Database:        "telegraf",
+			RetentionPolicy: "autogen",
+		},
+	}
+
+	count := 1
+	tasks := make([]client.Task, count)
+	for i := 0; i < count; i++ {
+		task, err := cli.CreateTask(client.CreateTaskOptions{
+			TemplateID: template.ID,
+			Status:     client.Enabled,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tasks[i] = task
+
+		ti, err := cli.Task(task.Link, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !reflect.DeepEqual(ti.DBRPs, implicitDBRPs) {
+			t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, implicitDBRPs)
+		}
+	}
+
+	updateTick := `var x = 5
+	
+	stream
+	    |from()
+	        .measurement('test')
+	`
+
+	_, err = cli.UpdateTemplate(template.Link, client.UpdateTemplateOptions{
+		ID:         id,
+		TICKscript: updateTick,
+	})
+	// Expects error
+	if err == nil {
+		t.Fatal(err)
+	}
+
+	finalTick := `dbrp "telegraf"."autogen"
+
+	dbrp "telegraf"."not_autogen"
+
+	var x = 5
+	
+	stream
+	    |from()
+	        .measurement('test')
+	`
+
+	finalDBRPs := []client.DBRP{
+		{
+			Database:        "telegraf",
+			RetentionPolicy: "autogen",
+		},
+		{
+			Database:        "telegraf",
+			RetentionPolicy: "not_autogen",
+		},
+	}
+	template, err = cli.UpdateTemplate(template.Link, client.UpdateTemplateOptions{
+		ID:         id,
+		TICKscript: finalTick,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, task := range tasks {
+		ti, err := cli.Task(task.Link, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !reflect.DeepEqual(ti.DBRPs, finalDBRPs) {
+			t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, finalDBRPs)
+		}
 	}
 }
 func TestServer_UpdateTemplateID_WithTasks(t *testing.T) {
@@ -2925,7 +3318,7 @@ test value=1 0000000012
 			t.Fatal(err)
 		}
 		retry++
-		if retry > 10 {
+		if retry > 100 {
 			t.Fatal("failed to finish recording")
 		}
 	}
@@ -2966,7 +3359,214 @@ test value=1 0000000012
 		t.Errorf("replay failed: %s", replay.Error)
 	}
 
-	f, err := os.Open(path.Join(tmpDir, "alert.log"))
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	type response struct {
+		ID      string          `json:"id"`
+		Message string          `json:"message"`
+		Time    time.Time       `json:"time"`
+		Level   string          `json:"level"`
+		Data    influxql.Result `json:"data"`
+	}
+	exp := response{
+		ID:      "test-count",
+		Message: "test-count got: 15",
+		Time:    time.Date(1970, 1, 1, 0, 0, 10, 0, time.UTC),
+		Level:   "CRITICAL",
+		Data: influxql.Result{
+			Series: imodels.Rows{
+				{
+					Name:    "test",
+					Columns: []string{"time", "count"},
+					Values: [][]interface{}{
+						{
+							time.Date(1970, 1, 1, 0, 0, 10, 0, time.UTC).Format(time.RFC3339Nano),
+							15.0,
+						},
+					},
+				},
+			},
+		},
+	}
+	got := response{}
+	d := json.NewDecoder(f)
+	d.Decode(&got)
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("unexpected alert log:\ngot %v\nexp %v", got, exp)
+	}
+
+	recordings, err := cli.ListRecordings(nil)
+	if err != nil {
+		t.Error(err)
+	}
+	if exp, got := 1, len(recordings); exp != got {
+		t.Fatalf("unexpected recordings list:\ngot %v\nexp %v\nrecordings %v", got, exp, recordings)
+	}
+
+	err = cli.DeleteRecording(recordings[0].Link)
+	if err != nil {
+		t.Error(err)
+	}
+
+	recordings, err = cli.ListRecordings(nil)
+	if err != nil {
+		t.Error(err)
+	}
+	if exp, got := 0, len(recordings); exp != got {
+		t.Errorf("unexpected recordings list after delete:\ngot %v\nexp %v\nrecordings %v", got, exp, recordings)
+	}
+
+	replays, err := cli.ListReplays(nil)
+	if err != nil {
+		t.Error(err)
+	}
+	if exp, got := 1, len(replays); exp != got {
+		t.Fatalf("unexpected replays list:\ngot %v\nexp %v\nreplays %v", got, exp, replays)
+	}
+
+	err = cli.DeleteReplay(replays[0].Link)
+	if err != nil {
+		t.Error(err)
+	}
+
+	replays, err = cli.ListReplays(nil)
+	if err != nil {
+		t.Error(err)
+	}
+	if exp, got := 0, len(replays); exp != got {
+		t.Errorf("unexpected replays list after delete:\ngot %v\nexp %v\nreplays %v", got, exp, replays)
+	}
+}
+
+func TestServer_RecordReplayStreamWithPost(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testStreamTask"
+	ttype := client.StreamTask
+	dbrps := []client.DBRP{{
+		Database:        "mydb",
+		RetentionPolicy: "myrp",
+	}}
+
+	tmpDir, err := ioutil.TempDir("", "testStreamTaskRecording")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	tick := `stream
+    |from()
+        .measurement('test')
+    |window()
+        .period(10s)
+        .every(10s)
+    |count('value')
+    |alert()
+        .id('test-count')
+        .message('{{ .ID }} got: {{ index .Fields "count" }}')
+        .crit(lambda: TRUE)
+        .post('http://localhost:8080')
+        .log('` + tmpDir + `/alert.log')
+`
+
+	task, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		Type:       ttype,
+		DBRPs:      dbrps,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording, err := cli.RecordStream(client.RecordStreamOptions{
+		ID:   "recordingid",
+		Task: task.ID,
+		Stop: time.Date(1970, 1, 1, 0, 0, 10, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp, got := "/kapacitor/v1/recordings/recordingid", recording.Link.Href; exp != got {
+		t.Errorf("unexpected recording.Link.Href got %s exp %s", got, exp)
+	}
+
+	points := `test value=1 0000000000
+test value=1 0000000001
+test value=1 0000000001
+test value=1 0000000002
+test value=1 0000000002
+test value=1 0000000003
+test value=1 0000000003
+test value=1 0000000004
+test value=1 0000000005
+test value=1 0000000005
+test value=1 0000000005
+test value=1 0000000006
+test value=1 0000000007
+test value=1 0000000008
+test value=1 0000000009
+test value=1 0000000010
+test value=1 0000000011
+test value=1 0000000012
+`
+	v := url.Values{}
+	v.Add("precision", "s")
+	s.MustWrite("mydb", "myrp", points, v)
+
+	retry := 0
+	for recording.Status == client.Running {
+		time.Sleep(100 * time.Millisecond)
+		recording, err = cli.Recording(recording.Link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry++
+		if retry > 100 {
+			t.Fatal("failed to finish recording")
+		}
+	}
+	if recording.Status != client.Finished || recording.Error != "" {
+		t.Errorf("recording failed: %s", recording.Error)
+	}
+
+	replay, err := cli.CreateReplay(client.CreateReplayOptions{
+		ID:            "replayid",
+		Task:          id,
+		Recording:     recording.ID,
+		Clock:         client.Fast,
+		RecordingTime: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp, got := "/kapacitor/v1/replays/replayid", replay.Link.Href; exp != got {
+		t.Errorf("unexpected replay.Link.Href got %s exp %s", got, exp)
+	}
+	if exp, got := id, replay.Task; exp != got {
+		t.Errorf("unexpected replay.Task got %s exp %s", got, exp)
+	}
+
+	retry = 0
+	for replay.Status == client.Running {
+		time.Sleep(100 * time.Millisecond)
+		replay, err = cli.Replay(replay.Link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry++
+		if retry > 10 {
+			t.Fatal("failed to finish replay")
+		}
+	}
+	if replay.Status != client.Finished || replay.Error != "" {
+		t.Errorf("replay failed: %s", replay.Error)
+	}
+
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3169,7 +3769,7 @@ func TestServer_RecordReplayBatch(t *testing.T) {
 		}
 	}
 
-	f, err := os.Open(path.Join(tmpDir, "alert.log"))
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3382,7 +3982,7 @@ func TestServer_ReplayBatch(t *testing.T) {
 		}
 	}
 
-	f, err := os.Open(path.Join(tmpDir, "alert.log"))
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3635,7 +4235,7 @@ func TestServer_RecordReplayQuery(t *testing.T) {
 		}
 	}
 
-	f, err := os.Open(path.Join(tmpDir, "alert.log"))
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3919,7 +4519,7 @@ func TestServer_ReplayQuery(t *testing.T) {
 		}
 	}
 
-	f, err := os.Open(path.Join(tmpDir, "alert.log"))
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4024,6 +4624,498 @@ func TestServer_ReplayQuery(t *testing.T) {
 	}
 }
 
+// Test for recording and replaying a stream query where data has missing fields and tags.
+func TestServer_RecordReplayQuery_Missing(t *testing.T) {
+	c := NewConfig()
+	c.InfluxDB[0].Enabled = true
+	db := NewInfluxDB(func(q string) *iclient.Response {
+		if len(q) > 6 && q[:6] == "SELECT" {
+			r := &iclient.Response{
+				Results: []iclient.Result{{
+					Series: []imodels.Row{
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC).Format(time.RFC3339Nano),
+									1.0,
+									nil,
+								},
+								{
+									time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									2.0,
+								},
+								{
+									time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									10.0,
+								},
+								{
+									time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC).Format(time.RFC3339Nano),
+									11.0,
+									nil,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "", "t2": "4"},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC).Format(time.RFC3339Nano),
+									4.0,
+									4.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "", "t2": "7"},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									7.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "3", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC).Format(time.RFC3339Nano),
+									3.0,
+									3.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "5", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC).Format(time.RFC3339Nano),
+									5.0,
+									5.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "6", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									6.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "8", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									8.0,
+								},
+							},
+						},
+						{
+							Name:    "m",
+							Tags:    map[string]string{"t1": "9", "t2": ""},
+							Columns: []string{"time", "a", "b"},
+							Values: [][]interface{}{
+								{
+									time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC).Format(time.RFC3339Nano),
+									nil,
+									9.0,
+								},
+							},
+						},
+					},
+				}},
+			}
+			return r
+		}
+		return nil
+	})
+	c.InfluxDB[0].URLs = []string{db.URL()}
+	s := OpenServer(c)
+	defer s.Close()
+	cli := Client(s)
+
+	id := "testStreamQueryRecordReplay"
+	ttype := client.StreamTask
+	dbrps := []client.DBRP{{
+		Database:        "mydb",
+		RetentionPolicy: "myrp",
+	}}
+
+	// setup temp dir for alert.log
+	tmpDir, err := ioutil.TempDir("", "testStreamTaskRecordingReplay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	//defer os.RemoveAll(tmpDir)
+
+	tick := `stream
+	|from()
+		.measurement('m')
+	|log()
+	|alert()
+		.id('test-stream-query')
+		.crit(lambda: TRUE)
+		.details('')
+		.log('` + tmpDir + `/alert.log')
+`
+
+	if _, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		Type:       ttype,
+		DBRPs:      dbrps,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	recording, err := cli.RecordQuery(client.RecordQueryOptions{
+		ID:    "recordingid",
+		Query: "SELECT * FROM mydb.myrp.m",
+		Type:  client.StreamTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp, got := "/kapacitor/v1/recordings/recordingid", recording.Link.Href; exp != got {
+		t.Errorf("unexpected recording.Link.Href got %s exp %s", got, exp)
+	}
+	// Wait for recording to finish.
+	retry := 0
+	for recording.Status == client.Running {
+		time.Sleep(100 * time.Millisecond)
+		recording, err = cli.Recording(recording.Link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry++
+		if retry > 10 {
+			t.Fatal("failed to perfom recording")
+		}
+	}
+
+	replay, err := cli.CreateReplay(client.CreateReplayOptions{
+		Task:          id,
+		Recording:     recording.ID,
+		Clock:         client.Fast,
+		RecordingTime: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp, got := id, replay.Task; exp != got {
+		t.Errorf("unexpected replay.Task got %s exp %s", got, exp)
+	}
+
+	// Wait for replay to finish.
+	retry = 0
+	for replay.Status == client.Running {
+		time.Sleep(100 * time.Millisecond)
+		replay, err = cli.Replay(replay.Link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry++
+		if retry > 10 {
+			t.Fatal("failed to perfom replay")
+		}
+	}
+
+	// Validate we got the data in the alert.log
+
+	f, err := os.Open(filepath.Join(tmpDir, "alert.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	exp := []alert.Data{
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.OK,
+			Duration:      0 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Columns: []string{"time", "a"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 1, 0, time.UTC),
+								1.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      1 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+								2.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      2 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t1": "3"},
+						Columns: []string{"time", "a", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 3, 0, time.UTC),
+								3.0,
+								3.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      3 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t2": "4"},
+						Columns: []string{"time", "a", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+								4.0,
+								4.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      4 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t1": "5"},
+						Columns: []string{"time", "a", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+								5.0,
+								5.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      5 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t1": "6"},
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+								6.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      6 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t2": "7"},
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+								7.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      7 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t1": "8"},
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+								8.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      8 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Tags:    map[string]string{"t1": "9"},
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 9, 0, time.UTC),
+								9.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      9 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Columns: []string{"time", "b"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+								10.0,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ID:            "test-stream-query",
+			Message:       "test-stream-query is CRITICAL",
+			Time:          time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
+			Level:         alert.Critical,
+			PreviousLevel: alert.Critical,
+			Duration:      10 * time.Second,
+			Data: models.Result{
+				Series: models.Rows{
+					{
+						Name:    "m",
+						Columns: []string{"time", "a"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 11, 0, time.UTC),
+								11.0,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	dec := json.NewDecoder(f)
+	var got []alert.Data
+	for dec.More() {
+		g := alert.Data{}
+		dec.Decode(&g)
+		got = append(got, g)
+	}
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("unexpected alert log:\ngot %+v\nexp %+v", got, exp)
+	}
+}
+
 // If this test fails due to missing python dependencies, run 'INSTALL_PREFIX=/usr/local ./install-deps.sh' from the root directory of the
 // kapacitor project.
 func TestServer_UDFStreamAgents(t *testing.T) {
@@ -4048,7 +5140,7 @@ func TestServer_UDFStreamAgents(t *testing.T) {
 					"go",
 					"build",
 					"-o",
-					filepath.Join(tdir, "movavg"),
+					filepath.Join(tdir, "movavg"+ExecutableSuffix),
 					filepath.Join(udfDir, "agent/examples/moving_avg/moving_avg.go"),
 				)
 				out, err := cmd.CombinedOutput()
@@ -4067,7 +5159,7 @@ func TestServer_UDFStreamAgents(t *testing.T) {
 		{
 			buildFunc: func() error { return nil },
 			config: udf.FunctionConfig{
-				Prog:    "python2",
+				Prog:    PythonExecutable,
 				Args:    []string{"-u", filepath.Join(udfDir, "agent/examples/moving_avg/moving_avg.py")},
 				Timeout: toml.Duration(time.Minute),
 				Env: map[string]string{
@@ -4188,6 +5280,9 @@ test,group=b value=0 0000000011
 // If this test fails due to missing python dependencies, run 'INSTALL_PREFIX=/usr/local ./install-deps.sh' from the root directory of the
 // kapacitor project.
 func TestServer_UDFStreamAgentsSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping on windows as unix sockets are not available")
+	}
 	tdir, err := ioutil.TempDir("", "kapacitor_server_test")
 	if err != nil {
 		t.Fatal(err)
@@ -4205,7 +5300,7 @@ func TestServer_UDFStreamAgentsSocket(t *testing.T) {
 					"go",
 					"build",
 					"-o",
-					filepath.Join(tdir, "mirror"),
+					filepath.Join(tdir, "mirror"+ExecutableSuffix),
 					filepath.Join(udfDir, "agent/examples/mirror/mirror.go"),
 				)
 				out, err := cmd.CombinedOutput()
@@ -4229,7 +5324,7 @@ func TestServer_UDFStreamAgentsSocket(t *testing.T) {
 		{
 			startFunc: func() *exec.Cmd {
 				cmd := exec.Command(
-					"python2",
+					PythonExecutable,
 					"-u",
 					filepath.Join(udfDir, "agent/examples/mirror/mirror.py"),
 					filepath.Join(tdir, "mirror.py.sock"),
@@ -4370,7 +5465,7 @@ func TestServer_UDFBatchAgents(t *testing.T) {
 					"go",
 					"build",
 					"-o",
-					filepath.Join(tdir, "outliers"),
+					filepath.Join(tdir, "outliers"+ExecutableSuffix),
 					filepath.Join(udfDir, "agent/examples/outliers/outliers.go"),
 				)
 				out, err := cmd.CombinedOutput()
@@ -4389,7 +5484,7 @@ func TestServer_UDFBatchAgents(t *testing.T) {
 		{
 			buildFunc: func() error { return nil },
 			config: udf.FunctionConfig{
-				Prog:    "python2",
+				Prog:    PythonExecutable,
 				Args:    []string{"-u", filepath.Join(udfDir, "agent/examples/outliers/outliers.py")},
 				Timeout: toml.Duration(time.Minute),
 				Env: map[string]string{
@@ -5040,6 +6135,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 						"ssl-key":                     "",
 						"startup-timeout":             "1h0m0s",
 						"subscription-protocol":       "http",
+						"subscription-mode":           "cluster",
 						"subscriptions":               nil,
 						"subscriptions-sync-interval": "1m0s",
 						"timeout":                     "0s",
@@ -5071,6 +6167,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 					"ssl-key":                     "",
 					"startup-timeout":             "1h0m0s",
 					"subscription-protocol":       "http",
+					"subscription-mode":           "cluster",
 					"subscriptions":               nil,
 					"subscriptions-sync-interval": "1m0s",
 					"timeout":                     "0s",
@@ -5112,6 +6209,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 								"ssl-key":                     "",
 								"startup-timeout":             "1h0m0s",
 								"subscription-protocol":       "http",
+								"subscription-mode":           "cluster",
 								"subscriptions":               nil,
 								"subscriptions-sync-interval": "1m0s",
 								"timeout":                     "0s",
@@ -5143,6 +6241,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 							"ssl-key":                     "",
 							"startup-timeout":             "1h0m0s",
 							"subscription-protocol":       "http",
+							"subscription-mode":           "cluster",
 							"subscriptions":               nil,
 							"subscriptions-sync-interval": "1m0s",
 							"timeout":                     "0s",
@@ -5185,6 +6284,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 								"ssl-key":                     "",
 								"startup-timeout":             "1h0m0s",
 								"subscription-protocol":       "https",
+								"subscription-mode":           "cluster",
 								"subscriptions":               map[string]interface{}{"_internal": []interface{}{"monitor"}},
 								"subscriptions-sync-interval": "1m0s",
 								"timeout":                     "0s",
@@ -5216,6 +6316,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 							"ssl-key":                     "",
 							"startup-timeout":             "1h0m0s",
 							"subscription-protocol":       "https",
+							"subscription-mode":           "cluster",
 							"subscriptions":               map[string]interface{}{"_internal": []interface{}{"monitor"}},
 							"subscriptions-sync-interval": "1m0s",
 							"timeout":                     "0s",
@@ -5254,6 +6355,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 								"ssl-key":                     "",
 								"startup-timeout":             "1h0m0s",
 								"subscription-protocol":       "https",
+								"subscription-mode":           "cluster",
 								"subscriptions":               map[string]interface{}{"_internal": []interface{}{"monitor"}},
 								"subscriptions-sync-interval": "1m0s",
 								"timeout":                     "0s",
@@ -5285,6 +6387,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 							"ssl-key":                     "",
 							"startup-timeout":             "1h0m0s",
 							"subscription-protocol":       "https",
+							"subscription-mode":           "cluster",
 							"subscriptions":               map[string]interface{}{"_internal": []interface{}{"monitor"}},
 							"subscriptions-sync-interval": "1m0s",
 							"timeout":                     "0s",
@@ -5327,6 +6430,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 									"ssl-key":                     "",
 									"startup-timeout":             "1h0m0s",
 									"subscription-protocol":       "https",
+									"subscription-mode":           "cluster",
 									"subscriptions":               map[string]interface{}{"_internal": []interface{}{"monitor"}},
 									"subscriptions-sync-interval": "1m0s",
 									"timeout":                     "0s",
@@ -5357,6 +6461,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 									"ssl-key":                     "",
 									"startup-timeout":             "5m0s",
 									"subscription-protocol":       "http",
+									"subscription-mode":           "cluster",
 									"subscriptions":               nil,
 									"subscriptions-sync-interval": "1m0s",
 									"timeout":                     "0s",
@@ -5390,6 +6495,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 							"startup-timeout":             "5m0s",
 							"subscription-protocol":       "http",
 							"subscriptions":               nil,
+							"subscription-mode":           "cluster",
 							"subscriptions-sync-interval": "1m0s",
 							"timeout":                     "0s",
 							"udp-bind":                    "",
@@ -5422,6 +6528,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 						"token-prefix": "",
 						"url":          "http://alerta.example.com",
 						"insecure-skip-verify": false,
+						"timeout":              "0s",
 					},
 					Redacted: []string{
 						"token",
@@ -5438,6 +6545,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 					"token-prefix": "",
 					"url":          "http://alerta.example.com",
 					"insecure-skip-verify": false,
+					"timeout":              "0s",
 				},
 				Redacted: []string{
 					"token",
@@ -5447,8 +6555,9 @@ func TestServer_UpdateConfig(t *testing.T) {
 				{
 					updateAction: client.ConfigUpdateAction{
 						Set: map[string]interface{}{
-							"token":  "token",
-							"origin": "kapacitor",
+							"token":   "token",
+							"origin":  "kapacitor",
+							"timeout": "3h",
 						},
 					},
 					expSection: client.ConfigSection{
@@ -5463,6 +6572,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 								"token-prefix": "",
 								"url":          "http://alerta.example.com",
 								"insecure-skip-verify": false,
+								"timeout":              "3h0m0s",
 							},
 							Redacted: []string{
 								"token",
@@ -5479,9 +6589,119 @@ func TestServer_UpdateConfig(t *testing.T) {
 							"token-prefix": "",
 							"url":          "http://alerta.example.com",
 							"insecure-skip-verify": false,
+							"timeout":              "3h0m0s",
 						},
 						Redacted: []string{
 							"token",
+						},
+					},
+				},
+			},
+		},
+		{
+			section: "httppost",
+			element: "test",
+			setDefaults: func(c *server.Config) {
+				apc := httppost.Config{
+					Endpoint: "test",
+					URL:      "http://httppost.example.com",
+					Headers: map[string]string{
+						"testing": "works",
+					},
+				}
+				c.HTTPPost = httppost.Configs{apc}
+			},
+			expDefaultSection: client.ConfigSection{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost"},
+				Elements: []client.ConfigElement{
+					{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost/test"},
+						Options: map[string]interface{}{
+							"endpoint": "test",
+							"url":      "http://httppost.example.com",
+							"headers": map[string]interface{}{
+								"testing": "works",
+							},
+							"basic-auth":          false,
+							"alert-template":      "",
+							"alert-template-file": "",
+							"row-template":        "",
+							"row-template-file":   "",
+						},
+						Redacted: []string{
+							"basic-auth",
+						}},
+				},
+			},
+			expDefaultElement: client.ConfigElement{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost/test"},
+				Options: map[string]interface{}{
+					"endpoint": "test",
+					"url":      "http://httppost.example.com",
+					"headers": map[string]interface{}{
+						"testing": "works",
+					},
+					"basic-auth":          false,
+					"alert-template":      "",
+					"alert-template-file": "",
+					"row-template":        "",
+					"row-template-file":   "",
+				},
+				Redacted: []string{
+					"basic-auth",
+				},
+			},
+			updates: []updateAction{
+				{
+					element: "test",
+					updateAction: client.ConfigUpdateAction{
+						Set: map[string]interface{}{
+							"headers": map[string]string{
+								"testing": "more",
+							},
+							"basic-auth": httppost.BasicAuth{
+								Username: "usr",
+								Password: "pass",
+							},
+						},
+					},
+					expSection: client.ConfigSection{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost"},
+						Elements: []client.ConfigElement{{
+							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost/test"},
+							Options: map[string]interface{}{
+								"endpoint": "test",
+								"url":      "http://httppost.example.com",
+								"headers": map[string]interface{}{
+									"testing": "more",
+								},
+								"basic-auth":          true,
+								"alert-template":      "",
+								"alert-template-file": "",
+								"row-template":        "",
+								"row-template-file":   "",
+							},
+							Redacted: []string{
+								"basic-auth",
+							},
+						}},
+					},
+					expElement: client.ConfigElement{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/httppost/test"},
+						Options: map[string]interface{}{
+							"endpoint": "test",
+							"url":      "http://httppost.example.com",
+							"headers": map[string]interface{}{
+								"testing": "more",
+							},
+							"basic-auth":          true,
+							"alert-template":      "",
+							"alert-template-file": "",
+							"row-template":        "",
+							"row-template-file":   "",
+						},
+						Redacted: []string{
+							"basic-auth",
 						},
 					},
 				},
@@ -5564,19 +6784,22 @@ func TestServer_UpdateConfig(t *testing.T) {
 		{
 			section: "kubernetes",
 			setDefaults: func(c *server.Config) {
-				c.Kubernetes.APIServers = []string{"http://localhost:80001"}
+				c.Kubernetes = k8s.Configs{k8s.NewConfig()}
+				c.Kubernetes[0].APIServers = []string{"http://localhost:80001"}
 			},
 			expDefaultSection: client.ConfigSection{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/kubernetes"},
 				Elements: []client.ConfigElement{{
 					Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/kubernetes/"},
 					Options: map[string]interface{}{
+						"id":          "",
 						"api-servers": []interface{}{"http://localhost:80001"},
 						"ca-path":     "",
 						"enabled":     false,
 						"in-cluster":  false,
 						"namespace":   "",
 						"token":       false,
+						"resource":    "",
 					},
 					Redacted: []string{
 						"token",
@@ -5586,12 +6809,14 @@ func TestServer_UpdateConfig(t *testing.T) {
 			expDefaultElement: client.ConfigElement{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/kubernetes/"},
 				Options: map[string]interface{}{
+					"id":          "",
 					"api-servers": []interface{}{"http://localhost:80001"},
 					"ca-path":     "",
 					"enabled":     false,
 					"in-cluster":  false,
 					"namespace":   "",
 					"token":       false,
+					"resource":    "",
 				},
 				Redacted: []string{
 					"token",
@@ -5609,12 +6834,14 @@ func TestServer_UpdateConfig(t *testing.T) {
 						Elements: []client.ConfigElement{{
 							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/kubernetes/"},
 							Options: map[string]interface{}{
+								"id":          "",
 								"api-servers": []interface{}{"http://localhost:80001"},
 								"ca-path":     "",
 								"enabled":     false,
 								"in-cluster":  false,
 								"namespace":   "",
 								"token":       true,
+								"resource":    "",
 							},
 							Redacted: []string{
 								"token",
@@ -5624,12 +6851,14 @@ func TestServer_UpdateConfig(t *testing.T) {
 					expElement: client.ConfigElement{
 						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/kubernetes/"},
 						Options: map[string]interface{}{
+							"id":          "",
 							"api-servers": []interface{}{"http://localhost:80001"},
 							"ca-path":     "",
 							"enabled":     false,
 							"in-cluster":  false,
 							"namespace":   "",
 							"token":       true,
+							"resource":    "",
 						},
 						Redacted: []string{
 							"token",
@@ -5711,6 +6940,110 @@ func TestServer_UpdateConfig(t *testing.T) {
 						},
 						Redacted: []string{
 							"token",
+						},
+					},
+				},
+			},
+		},
+		{
+			section: "mqtt",
+			setDefaults: func(c *server.Config) {
+				c.MQTT = mqtt.Configs{mqtt.Config{
+					Name:       "default",
+					URL:        "tcp://mqtt.example.com:1883",
+					NewClientF: mqtttest.NewClient,
+				}}
+			},
+			element: "default",
+			expDefaultSection: client.ConfigSection{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt"},
+				Elements: []client.ConfigElement{{
+					Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt/default"},
+					Options: map[string]interface{}{
+						"enabled":              false,
+						"name":                 "default",
+						"default":              false,
+						"url":                  "tcp://mqtt.example.com:1883",
+						"ssl-ca":               "",
+						"ssl-cert":             "",
+						"ssl-key":              "",
+						"insecure-skip-verify": false,
+						"client-id":            "",
+						"username":             "",
+						"password":             false,
+					},
+					Redacted: []string{
+						"password",
+					},
+				}},
+			},
+			expDefaultElement: client.ConfigElement{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt/default"},
+				Options: map[string]interface{}{
+					"enabled":              false,
+					"name":                 "default",
+					"default":              false,
+					"url":                  "tcp://mqtt.example.com:1883",
+					"ssl-ca":               "",
+					"ssl-cert":             "",
+					"ssl-key":              "",
+					"insecure-skip-verify": false,
+					"client-id":            "",
+					"username":             "",
+					"password":             false,
+				},
+				Redacted: []string{
+					"password",
+				},
+			},
+			updates: []updateAction{
+				{
+					updateAction: client.ConfigUpdateAction{
+						Set: map[string]interface{}{
+							"client-id": "kapacitor-default",
+							"password":  "super secret",
+						},
+					},
+					element: "default",
+					expSection: client.ConfigSection{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt"},
+						Elements: []client.ConfigElement{{
+							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt/default"},
+							Options: map[string]interface{}{
+								"enabled":              false,
+								"name":                 "default",
+								"default":              false,
+								"url":                  "tcp://mqtt.example.com:1883",
+								"ssl-ca":               "",
+								"ssl-cert":             "",
+								"ssl-key":              "",
+								"insecure-skip-verify": false,
+								"client-id":            "kapacitor-default",
+								"username":             "",
+								"password":             true,
+							},
+							Redacted: []string{
+								"password",
+							},
+						}},
+					},
+					expElement: client.ConfigElement{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/mqtt/default"},
+						Options: map[string]interface{}{
+							"enabled":              false,
+							"name":                 "default",
+							"default":              false,
+							"url":                  "tcp://mqtt.example.com:1883",
+							"ssl-ca":               "",
+							"ssl-cert":             "",
+							"ssl-key":              "",
+							"insecure-skip-verify": false,
+							"client-id":            "kapacitor-default",
+							"username":             "",
+							"password":             true,
+						},
+						Redacted: []string{
+							"password",
 						},
 					},
 				},
@@ -5978,9 +7311,10 @@ func TestServer_UpdateConfig(t *testing.T) {
 				Elements: []client.ConfigElement{{
 					Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/sensu/"},
 					Options: map[string]interface{}{
-						"addr":    "sensu.example.com:3000",
-						"enabled": false,
-						"source":  "Kapacitor",
+						"addr":     "sensu.example.com:3000",
+						"enabled":  false,
+						"source":   "Kapacitor",
+						"handlers": nil,
 					},
 					Redacted: nil,
 				}},
@@ -5988,9 +7322,10 @@ func TestServer_UpdateConfig(t *testing.T) {
 			expDefaultElement: client.ConfigElement{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/sensu/"},
 				Options: map[string]interface{}{
-					"addr":    "sensu.example.com:3000",
-					"enabled": false,
-					"source":  "Kapacitor",
+					"addr":     "sensu.example.com:3000",
+					"enabled":  false,
+					"source":   "Kapacitor",
+					"handlers": nil,
 				},
 				Redacted: nil,
 			},
@@ -6000,7 +7335,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 						Set: map[string]interface{}{
 							"addr":    "sensu.local:3000",
 							"enabled": true,
-							"source":  "",
+							"source":  "Kapacitor",
 						},
 					},
 					expSection: client.ConfigSection{
@@ -6008,9 +7343,10 @@ func TestServer_UpdateConfig(t *testing.T) {
 						Elements: []client.ConfigElement{{
 							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/sensu/"},
 							Options: map[string]interface{}{
-								"addr":    "sensu.local:3000",
-								"enabled": true,
-								"source":  "",
+								"addr":     "sensu.local:3000",
+								"enabled":  true,
+								"source":   "Kapacitor",
+								"handlers": nil,
 							},
 							Redacted: nil,
 						}},
@@ -6018,9 +7354,10 @@ func TestServer_UpdateConfig(t *testing.T) {
 					expElement: client.ConfigElement{
 						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/sensu/"},
 						Options: map[string]interface{}{
-							"addr":    "sensu.local:3000",
-							"enabled": true,
-							"source":  "",
+							"addr":     "sensu.local:3000",
+							"enabled":  true,
+							"source":   "Kapacitor",
+							"handlers": nil,
 						},
 						Redacted: nil,
 					},
@@ -6037,13 +7374,17 @@ func TestServer_UpdateConfig(t *testing.T) {
 				Elements: []client.ConfigElement{{
 					Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/slack/"},
 					Options: map[string]interface{}{
-						"channel":            "",
-						"enabled":            false,
-						"global":             true,
-						"icon-emoji":         "",
-						"state-changes-only": false,
-						"url":                false,
-						"username":           "kapacitor",
+						"channel":              "",
+						"enabled":              false,
+						"global":               true,
+						"icon-emoji":           "",
+						"state-changes-only":   false,
+						"url":                  false,
+						"username":             "kapacitor",
+						"ssl-ca":               "",
+						"ssl-cert":             "",
+						"ssl-key":              "",
+						"insecure-skip-verify": false,
 					},
 					Redacted: []string{
 						"url",
@@ -6053,13 +7394,17 @@ func TestServer_UpdateConfig(t *testing.T) {
 			expDefaultElement: client.ConfigElement{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/slack/"},
 				Options: map[string]interface{}{
-					"channel":            "",
-					"enabled":            false,
-					"global":             true,
-					"icon-emoji":         "",
-					"state-changes-only": false,
-					"url":                false,
-					"username":           "kapacitor",
+					"channel":              "",
+					"enabled":              false,
+					"global":               true,
+					"icon-emoji":           "",
+					"state-changes-only":   false,
+					"url":                  false,
+					"username":             "kapacitor",
+					"ssl-ca":               "",
+					"ssl-cert":             "",
+					"ssl-key":              "",
+					"insecure-skip-verify": false,
 				},
 				Redacted: []string{
 					"url",
@@ -6080,13 +7425,17 @@ func TestServer_UpdateConfig(t *testing.T) {
 						Elements: []client.ConfigElement{{
 							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/slack/"},
 							Options: map[string]interface{}{
-								"channel":            "#general",
-								"enabled":            true,
-								"global":             false,
-								"icon-emoji":         "",
-								"state-changes-only": false,
-								"url":                true,
-								"username":           "kapacitor",
+								"channel":              "#general",
+								"enabled":              true,
+								"global":               false,
+								"icon-emoji":           "",
+								"state-changes-only":   false,
+								"url":                  true,
+								"username":             "kapacitor",
+								"ssl-ca":               "",
+								"ssl-cert":             "",
+								"ssl-key":              "",
+								"insecure-skip-verify": false,
 							},
 							Redacted: []string{
 								"url",
@@ -6096,13 +7445,17 @@ func TestServer_UpdateConfig(t *testing.T) {
 					expElement: client.ConfigElement{
 						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/slack/"},
 						Options: map[string]interface{}{
-							"channel":            "#general",
-							"enabled":            true,
-							"global":             false,
-							"icon-emoji":         "",
-							"state-changes-only": false,
-							"url":                true,
-							"username":           "kapacitor",
+							"channel":              "#general",
+							"enabled":              true,
+							"global":               false,
+							"icon-emoji":           "",
+							"state-changes-only":   false,
+							"url":                  true,
+							"username":             "kapacitor",
+							"ssl-ca":               "",
+							"ssl-cert":             "",
+							"ssl-key":              "",
+							"insecure-skip-verify": false,
 						},
 						Redacted: []string{
 							"url",
@@ -6180,6 +7533,81 @@ func TestServer_UpdateConfig(t *testing.T) {
 						Redacted: []string{
 							"community",
 						},
+					},
+				},
+			},
+		},
+		{
+			section: "swarm",
+			setDefaults: func(c *server.Config) {
+				c.Swarm = swarm.Configs{swarm.Config{
+					Servers: []string{"http://localhost:80001"},
+				}}
+			},
+			expDefaultSection: client.ConfigSection{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm"},
+				Elements: []client.ConfigElement{{
+					Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm/"},
+					Options: map[string]interface{}{
+						"id":                   "",
+						"enabled":              false,
+						"servers":              []interface{}{"http://localhost:80001"},
+						"ssl-ca":               "",
+						"ssl-cert":             "",
+						"ssl-key":              "",
+						"insecure-skip-verify": false,
+					},
+					Redacted: nil,
+				}},
+			},
+			expDefaultElement: client.ConfigElement{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm/"},
+				Options: map[string]interface{}{
+					"id":                   "",
+					"enabled":              false,
+					"servers":              []interface{}{"http://localhost:80001"},
+					"ssl-ca":               "",
+					"ssl-cert":             "",
+					"ssl-key":              "",
+					"insecure-skip-verify": false,
+				},
+				Redacted: nil,
+			},
+			updates: []updateAction{
+				{
+					updateAction: client.ConfigUpdateAction{
+						Set: map[string]interface{}{
+							"enabled": true,
+						},
+					},
+					expSection: client.ConfigSection{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm"},
+						Elements: []client.ConfigElement{{
+							Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm/"},
+							Options: map[string]interface{}{
+								"id":                   "",
+								"enabled":              true,
+								"servers":              []interface{}{"http://localhost:80001"},
+								"ssl-ca":               "",
+								"ssl-cert":             "",
+								"ssl-key":              "",
+								"insecure-skip-verify": false,
+							},
+							Redacted: nil,
+						}},
+					},
+					expElement: client.ConfigElement{
+						Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/config/swarm/"},
+						Options: map[string]interface{}{
+							"id":                   "",
+							"enabled":              true,
+							"servers":              []interface{}{"http://localhost:80001"},
+							"ssl-ca":               "",
+							"ssl-cert":             "",
+							"ssl-key":              "",
+							"insecure-skip-verify": false,
+						},
+						Redacted: nil,
 					},
 				},
 			},
@@ -6469,7 +7897,7 @@ func TestServer_UpdateConfig(t *testing.T) {
 	) error {
 		// Get all sections
 		if config, err := cli.ConfigSections(); err != nil {
-			return err
+			return errors.Wrap(err, "failed to get sections")
 		} else {
 			if err := compareSections(config.Sections[section], expSection); err != nil {
 				return fmt.Errorf("%s: %v", section, err)
@@ -6496,35 +7924,37 @@ func TestServer_UpdateConfig(t *testing.T) {
 		return nil
 	}
 
-	for _, tc := range testCases {
-		// Create default config
-		c := NewConfig()
-		if tc.setDefaults != nil {
-			tc.setDefaults(c)
-		}
-		s := OpenServer(c)
-		cli := Client(s)
-		defer s.Close()
+	for i, tc := range testCases {
+		t.Run(fmt.Sprintf("%s/%s-%d", tc.section, tc.element, i), func(t *testing.T) {
+			// Create default config
+			c := NewConfig()
+			if tc.setDefaults != nil {
+				tc.setDefaults(c)
+			}
+			s := OpenServer(c)
+			cli := Client(s)
+			defer s.Close()
 
-		if err := validate(cli, tc.section, tc.element, tc.expDefaultSection, tc.expDefaultElement); err != nil {
-			t.Errorf("unexpected defaults for %s/%s: %v", tc.section, tc.element, err)
-		}
-
-		for i, ua := range tc.updates {
-			link := cli.ConfigElementLink(tc.section, ua.element)
-
-			if len(ua.updateAction.Add) > 0 ||
-				len(ua.updateAction.Remove) > 0 {
-				link = cli.ConfigSectionLink(tc.section)
+			if err := validate(cli, tc.section, tc.element, tc.expDefaultSection, tc.expDefaultElement); err != nil {
+				t.Errorf("unexpected defaults for %s/%s: %v", tc.section, tc.element, err)
 			}
 
-			if err := cli.ConfigUpdate(link, ua.updateAction); err != nil {
-				t.Fatal(err)
+			for i, ua := range tc.updates {
+				link := cli.ConfigElementLink(tc.section, ua.element)
+
+				if len(ua.updateAction.Add) > 0 ||
+					len(ua.updateAction.Remove) > 0 {
+					link = cli.ConfigSectionLink(tc.section)
+				}
+
+				if err := cli.ConfigUpdate(link, ua.updateAction); err != nil {
+					t.Fatal(err)
+				}
+				if err := validate(cli, tc.section, ua.element, ua.expSection, ua.expElement); err != nil {
+					t.Errorf("unexpected update result %d for %s/%s: %v", i, tc.section, ua.element, err)
+				}
 			}
-			if err := validate(cli, tc.section, ua.element, ua.expSection, ua.expElement); err != nil {
-				t.Errorf("unexpected update result %d for %s/%s: %v", i, tc.section, ua.element, err)
-			}
-		}
+		})
 	}
 }
 func TestServer_ListServiceTests(t *testing.T) {
@@ -6553,6 +7983,48 @@ func TestServer_ListServiceTests(t *testing.T) {
 						"testServiceA",
 						"testServiceB",
 					},
+					"timeout": "24h0m0s",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/azure"},
+				Name: "azure",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/consul"},
+				Name: "consul",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/dns"},
+				Name: "dns",
+				Options: client.ServiceTestOptions{
+					"id": ""},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/ec2"},
+				Name: "ec2",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/file-discovery"},
+				Name: "file-discovery",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/gce"},
+				Name: "gce",
+				Options: client.ServiceTestOptions{
+					"id": "",
 				},
 			},
 			{
@@ -6565,6 +8037,16 @@ func TestServer_ListServiceTests(t *testing.T) {
 				},
 			},
 			{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/httppost"},
+				Name: "httppost",
+				Options: client.ServiceTestOptions{
+					"endpoint": "example",
+					"url":      "http://localhost:3000/",
+					"headers":  map[string]interface{}{"Auth": "secret"},
+					"timeout":  float64(0),
+				},
+			},
+			{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/influxdb"},
 				Name: "influxdb",
 				Options: client.ServiceTestOptions{
@@ -6572,9 +8054,36 @@ func TestServer_ListServiceTests(t *testing.T) {
 				},
 			},
 			{
-				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/kubernetes"},
-				Name:    "kubernetes",
-				Options: nil,
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/kubernetes"},
+				Name: "kubernetes",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/marathon"},
+				Name: "marathon",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/mqtt"},
+				Name: "mqtt",
+				Options: client.ServiceTestOptions{
+					"broker-name": "",
+					"topic":       "",
+					"message":     "test MQTT message",
+					"qos":         "at-most-once",
+					"retained":    false,
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/nerve"},
+				Name: "nerve",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
 			},
 			{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/opsgenie"},
@@ -6594,6 +8103,7 @@ func TestServer_ListServiceTests(t *testing.T) {
 					"incident-key": "testIncidentKey",
 					"description":  "test pagerduty message",
 					"level":        "CRITICAL",
+					"details":      "",
 				},
 			},
 			{
@@ -6611,12 +8121,28 @@ func TestServer_ListServiceTests(t *testing.T) {
 				},
 			},
 			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/scraper"},
+				Name: "scraper",
+				Options: client.ServiceTestOptions{
+					"name": "",
+				},
+			},
+			{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/sensu"},
 				Name: "sensu",
 				Options: client.ServiceTestOptions{
-					"name":   "testName",
-					"output": "testOutput",
-					"level":  "CRITICAL",
+					"name":     "testName",
+					"output":   "testOutput",
+					"source":   "Kapacitor",
+					"handlers": []interface{}{},
+					"level":    "CRITICAL",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/serverset"},
+				Name: "serverset",
+				Options: client.ServiceTestOptions{
+					"id": "",
 				},
 			},
 			{
@@ -6654,6 +8180,20 @@ func TestServer_ListServiceTests(t *testing.T) {
 				},
 			},
 			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/static-discovery"},
+				Name: "static-discovery",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/swarm"},
+				Name: "swarm",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/talk"},
 				Name: "talk",
 				Options: client.ServiceTestOptions{
@@ -6670,6 +8210,13 @@ func TestServer_ListServiceTests(t *testing.T) {
 					"message":                  "test telegram message",
 					"disable-web-page-preview": false,
 					"disable-notification":     false,
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/triton"},
+				Name: "triton",
+				Options: client.ServiceTestOptions{
+					"id": "",
 				},
 			},
 			{
@@ -6712,12 +8259,28 @@ func TestServer_ListServiceTests_WithPattern(t *testing.T) {
 		Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests"},
 		Services: []client.ServiceTest{
 			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/scraper"},
+				Name: "scraper",
+				Options: client.ServiceTestOptions{
+					"name": "",
+				},
+			},
+			{
 				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/sensu"},
 				Name: "sensu",
 				Options: client.ServiceTestOptions{
-					"name":   "testName",
-					"output": "testOutput",
-					"level":  "CRITICAL",
+					"name":     "testName",
+					"output":   "testOutput",
+					"source":   "Kapacitor",
+					"handlers": []interface{}{},
+					"level":    "CRITICAL",
+				},
+			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/serverset"},
+				Name: "serverset",
+				Options: client.ServiceTestOptions{
+					"id": "",
 				},
 			},
 			{
@@ -6754,6 +8317,20 @@ func TestServer_ListServiceTests_WithPattern(t *testing.T) {
 					},
 				},
 			},
+			{
+				Link: client.Link{Relation: "self", Href: "/kapacitor/v1/service-tests/static-discovery"},
+				Name: "static-discovery",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
+			{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/service-tests/swarm"},
+				Name: "swarm",
+				Options: client.ServiceTestOptions{
+					"id": "",
+				},
+			},
 		},
 	}
 	if got, exp := serviceTests.Link.Href, expServiceTests.Link.Href; got != exp {
@@ -6761,6 +8338,7 @@ func TestServer_ListServiceTests_WithPattern(t *testing.T) {
 	}
 	if got, exp := len(serviceTests.Services), len(expServiceTests.Services); got != exp {
 		t.Fatalf("unexpected length of services: got %d exp %d", got, exp)
+
 	}
 	for i := range expServiceTests.Services {
 		exp := expServiceTests.Services[i]
@@ -6824,10 +8402,23 @@ func TestServer_DoServiceTest(t *testing.T) {
 		},
 		{
 			service: "kubernetes",
-			options: client.ServiceTestOptions{},
+			options: client.ServiceTestOptions{
+				"id": "default",
+			},
 			exp: client.ServiceTestResult{
 				Success: false,
-				Message: "failed to get client: service is not enabled",
+				Message: "unknown kubernetes cluster \"default\"",
+			},
+		},
+		{
+			service: "mqtt",
+			options: client.ServiceTestOptions{
+				"broker-name": "default",
+				"topic":       "test",
+			},
+			exp: client.ServiceTestResult{
+				Success: false,
+				Message: "unknown MQTT broker \"default\"",
 			},
 		},
 		{
@@ -6887,6 +8478,14 @@ func TestServer_DoServiceTest(t *testing.T) {
 			},
 		},
 		{
+			service: "swarm",
+			options: client.ServiceTestOptions{},
+			exp: client.ServiceTestResult{
+				Success: false,
+				Message: "unknown swarm cluster \"\"",
+			},
+		},
+		{
 			service: "talk",
 			options: client.ServiceTestOptions{},
 			exp: client.ServiceTestResult{
@@ -6936,184 +8535,69 @@ func TestServer_DoServiceTest(t *testing.T) {
 
 func TestServer_AlertHandlers_CRUD(t *testing.T) {
 	testCases := []struct {
-		create    client.HandlerOptions
-		expCreate client.Handler
+		topic     string
+		create    client.TopicHandlerOptions
+		expCreate client.TopicHandler
 		patch     client.JSONPatch
-		expPatch  client.Handler
-		put       client.HandlerOptions
-		expPut    client.Handler
+		expPatch  client.TopicHandler
+		put       client.TopicHandlerOptions
+		expPut    client.TopicHandler
 	}{
 		{
-			create: client.HandlerOptions{
-				ID:     "myhandler",
-				Topics: []string{"system", "test"},
-				Actions: []client.HandlerAction{{
-					Kind: "slack",
-					Options: map[string]interface{}{
-						"channel": "#test",
-					},
-				}},
+			topic: "system",
+			create: client.TopicHandlerOptions{
+				ID:   "myhandler",
+				Kind: "slack",
+				Options: map[string]interface{}{
+					"channel": "#test",
+				},
 			},
-			expCreate: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/myhandler"},
-				ID:     "myhandler",
-				Topics: []string{"system", "test"},
-				Actions: []client.HandlerAction{{
-					Kind: "slack",
-					Options: map[string]interface{}{
-						"channel": "#test",
-					},
-				}},
+			expCreate: client.TopicHandler{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/system/handlers/myhandler"},
+				ID:   "myhandler",
+				Kind: "slack",
+				Options: map[string]interface{}{
+					"channel": "#test",
+				},
 			},
 			patch: client.JSONPatch{
 				{
-					Path:      "/topics/0",
+					Path:      "/kind",
+					Operation: "replace",
+					Value:     "log",
+				},
+				{
+					Path:      "/options/channel",
 					Operation: "remove",
 				},
 				{
-					Path:      "/actions/0/options/channel",
-					Operation: "replace",
-					Value:     "#kapacitor_test",
-				},
-			},
-			expPatch: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/myhandler"},
-				ID:     "myhandler",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{{
-					Kind: "slack",
-					Options: map[string]interface{}{
-						"channel": "#kapacitor_test",
-					},
-				}},
-			},
-			put: client.HandlerOptions{
-				ID:     "newid",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{{
-					Kind: "smtp",
-					Options: map[string]interface{}{
-						"to": []string{"oncall@example.com"},
-					},
-				}},
-			},
-			expPut: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/newid"},
-				ID:     "newid",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{{
-					Kind: "smtp",
-					Options: map[string]interface{}{
-						"to": []interface{}{"oncall@example.com"},
-					},
-				}},
-			},
-		},
-		{
-			create: client.HandlerOptions{
-				ID:     "anotherhandler",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{
-					{
-						Kind: "slack",
-						Options: map[string]interface{}{
-							"channel": "#test",
-						},
-					},
-					{
-						Kind: "log",
-						Options: map[string]interface{}{
-							"path": "/tmp/alert.log",
-						},
-					},
-				},
-			},
-			expCreate: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/anotherhandler"},
-				ID:     "anotherhandler",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{
-					{
-						Kind: "slack",
-						Options: map[string]interface{}{
-							"channel": "#test",
-						},
-					},
-					{
-						Kind: "log",
-						Options: map[string]interface{}{
-							"path": "/tmp/alert.log",
-						},
-					},
-				},
-			},
-			patch: client.JSONPatch{
-				{
-					Path:      "/topics/-",
+					Path:      "/options/path",
 					Operation: "add",
-					Value:     "system",
-				},
-				{
-					Path:      "/actions/0/options/channel",
-					Operation: "replace",
-					Value:     "#kapacitor_test",
-				},
-				{
-					Path:      "/actions/-",
-					Operation: "add",
-					Value: map[string]interface{}{
-						"kind": "smtp",
-						"options": map[string]interface{}{
-							"to": []string{"oncall@example.com"},
-						},
-					},
+					Value:     AlertLogPath,
 				},
 			},
-			expPatch: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/anotherhandler"},
-				ID:     "anotherhandler",
-				Topics: []string{"test", "system"},
-				Actions: []client.HandlerAction{
-					{
-						Kind: "slack",
-						Options: map[string]interface{}{
-							"channel": "#kapacitor_test",
-						},
-					},
-					{
-						Kind: "log",
-						Options: map[string]interface{}{
-							"path": "/tmp/alert.log",
-						},
-					},
-					{
-						Kind: "smtp",
-						Options: map[string]interface{}{
-							"to": []interface{}{"oncall@example.com"},
-						},
-					},
+			expPatch: client.TopicHandler{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/system/handlers/myhandler"},
+				ID:   "myhandler",
+				Kind: "log",
+				Options: map[string]interface{}{
+					"path": AlertLogPath,
 				},
 			},
-			put: client.HandlerOptions{
-				ID:     "anotherhandler",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{{
-					Kind: "smtp",
-					Options: map[string]interface{}{
-						"to": []string{"oncall@example.com"},
-					},
-				}},
+			put: client.TopicHandlerOptions{
+				ID:   "newid",
+				Kind: "smtp",
+				Options: map[string]interface{}{
+					"to": []string{"oncall@example.com"},
+				},
 			},
-			expPut: client.Handler{
-				Link:   client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/anotherhandler"},
-				ID:     "anotherhandler",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{{
-					Kind: "smtp",
-					Options: map[string]interface{}{
-						"to": []interface{}{"oncall@example.com"},
-					},
-				}},
+			expPut: client.TopicHandler{
+				Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/system/handlers/newid"},
+				ID:   "newid",
+				Kind: "smtp",
+				Options: map[string]interface{}{
+					"to": []interface{}{"oncall@example.com"},
+				},
 			},
 		},
 	}
@@ -7124,7 +8608,7 @@ func TestServer_AlertHandlers_CRUD(t *testing.T) {
 		cli := Client(s)
 		defer s.Close()
 
-		h, err := cli.CreateHandler(tc.create)
+		h, err := cli.CreateTopicHandler(cli.TopicHandlersLink(tc.topic), tc.create)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -7133,7 +8617,7 @@ func TestServer_AlertHandlers_CRUD(t *testing.T) {
 			t.Errorf("unexpected handler created:\ngot\n%#v\nexp\n%#v\n", h, tc.expCreate)
 		}
 
-		h, err = cli.PatchHandler(h.Link, tc.patch)
+		h, err = cli.PatchTopicHandler(h.Link, tc.patch)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -7142,7 +8626,7 @@ func TestServer_AlertHandlers_CRUD(t *testing.T) {
 			t.Errorf("unexpected handler patched:\ngot\n%#v\nexp\n%#v\n", h, tc.expPatch)
 		}
 
-		h, err = cli.ReplaceHandler(h.Link, tc.put)
+		h, err = cli.ReplaceTopicHandler(h.Link, tc.put)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -7154,7 +8638,7 @@ func TestServer_AlertHandlers_CRUD(t *testing.T) {
 		// Restart server
 		s.Restart()
 
-		rh, err := cli.Handler(h.Link)
+		rh, err := cli.TopicHandler(h.Link)
 		if err != nil {
 			t.Fatalf("could not find handler after restart: %v", err)
 		}
@@ -7162,12 +8646,12 @@ func TestServer_AlertHandlers_CRUD(t *testing.T) {
 			t.Errorf("unexpected handler after restart:\ngot\n%#v\nexp\n%#v\n", got, exp)
 		}
 
-		err = cli.DeleteHandler(h.Link)
+		err = cli.DeleteTopicHandler(h.Link)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		_, err = cli.Handler(h.Link)
+		_, err = cli.TopicHandler(h.Link)
 		if err == nil {
 			t.Errorf("expected handler to be deleted")
 		}
@@ -7178,7 +8662,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 
 	resultJSON := `{"series":[{"name":"alert","columns":["time","value"],"values":[["1970-01-01T00:00:00Z",1]]}]}`
 
-	alertData := alertservice.AlertData{
+	alertData := alert.Data{
 		ID:      "id",
 		Message: "message",
 		Details: "details",
@@ -7202,12 +8686,12 @@ func TestServer_AlertHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	testCases := []struct {
-		handlerAction client.HandlerAction
-		setup         func(*server.Config, *client.HandlerAction) (context.Context, error)
-		result        func(context.Context) error
+		handler client.TopicHandler
+		setup   func(*server.Config, *client.TopicHandler) (context.Context, error)
+		result  func(context.Context) error
 	}{
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "alerta",
 				Options: map[string]interface{}{
 					"token":        "testtoken1234567",
@@ -7215,9 +8699,10 @@ func TestServer_AlertHandlers(t *testing.T) {
 					"origin":       "kapacitor",
 					"group":        "test",
 					"environment":  "env",
+					"timeout":      time.Duration(24 * time.Hour),
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := alertatest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7240,6 +8725,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 						Text:        "message",
 						Origin:      "kapacitor",
 						Service:     []string{"alert"},
+						Timeout:     86400,
 					},
 				}}
 				if !reflect.DeepEqual(exp, got) {
@@ -7249,14 +8735,14 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "exec",
 				Options: map[string]interface{}{
 					"prog": "/bin/alert-handler.sh",
 					"args": []string{"arg1", "arg2", "arg3"},
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				te := alerttest.NewExec()
 				ctxt := context.WithValue(nil, "exec", te)
 				c.Commander = te.Commander
@@ -7287,14 +8773,14 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "hipchat",
 				Options: map[string]interface{}{
 					"token": "testtoken1234567",
 					"room":  "1234567",
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := hipchattest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7322,15 +8808,15 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "log",
 				Options: map[string]interface{}{
 					"mode": 0604,
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				tdir := MustTempDir()
-				p := path.Join(tdir, "alert.log")
+				p := filepath.Join(tdir, "alert.log")
 
 				ha.Options["path"] = p
 
@@ -7344,8 +8830,8 @@ func TestServer_AlertHandlers(t *testing.T) {
 				tdir := ctxt.Value("tdir").(string)
 				defer os.RemoveAll(tdir)
 				l := ctxt.Value("log").(*alerttest.Log)
-				expData := []alertservice.AlertData{alertData}
-				expMode := os.FileMode(0604)
+				expData := []alert.Data{alertData}
+				expMode := os.FileMode(LogFileExpectedMode)
 
 				m, err := l.Mode()
 				if err != nil {
@@ -7365,14 +8851,61 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
+				Kind: "mqtt",
+				Options: map[string]interface{}{
+					"topic":    "test",
+					"qos":      "at-least-once",
+					"retained": true,
+				},
+			},
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
+				cc := new(mqtttest.ClientCreator)
+				ctxt := context.WithValue(nil, "clientCreator", cc)
+
+				c.MQTT = mqtt.Configs{
+					mqtt.Config{
+						Enabled:    true,
+						Name:       "test",
+						URL:        "tcp://mqtt.example.com:1883",
+						NewClientF: cc.NewClient,
+					},
+				}
+				return ctxt, nil
+			},
+			result: func(ctxt context.Context) error {
+				s := ctxt.Value("clientCreator").(*mqtttest.ClientCreator)
+				if got, exp := len(s.Clients), 1; got != exp {
+					return fmt.Errorf("unexpected number of clients created : exp %d got: %d", exp, got)
+				}
+				if got, exp := len(s.Configs), 1; got != exp {
+					return fmt.Errorf("unexpected number of configs received: exp %d got: %d", exp, got)
+				}
+				if got, exp := s.Configs[0].URL, "tcp://mqtt.example.com:1883"; exp != got {
+					return fmt.Errorf("unexpected config URL: exp %q got %q", exp, got)
+				}
+				got := s.Clients[0].PublishData
+				exp := []mqtttest.PublishData{{
+					Topic:    "test",
+					QoS:      mqtt.AtLeastOnce,
+					Retained: true,
+					Message:  []byte("message"),
+				}}
+				if !reflect.DeepEqual(exp, got) {
+					return fmt.Errorf("unexpected mqtt publish data:\nexp\n%+v\ngot\n%+v\n", exp, got)
+				}
+				return nil
+			},
+		},
+		{
+			handler: client.TopicHandler{
 				Kind: "opsgenie",
 				Options: map[string]interface{}{
 					"teams-list":      []string{"A team", "B team"},
 					"recipients-list": []string{"test_recipient1", "test_recipient2"},
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := opsgenietest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7408,13 +8941,102 @@ func TestServer_AlertHandlers(t *testing.T) {
 				return nil
 			},
 		},
-
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
+				Kind: "pagerduty",
+				Options: map[string]interface{}{
+					"service-key": "service_key",
+				},
+			},
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
+				ts := pagerdutytest.NewServer()
+				ctxt := context.WithValue(nil, "server", ts)
+
+				c.PagerDuty.Enabled = true
+				c.PagerDuty.URL = ts.URL
+				return ctxt, nil
+			},
+			result: func(ctxt context.Context) error {
+				ts := ctxt.Value("server").(*pagerdutytest.Server)
+				kapacitorURL := ctxt.Value("kapacitorURL").(string)
+				ts.Close()
+				got := ts.Requests()
+				exp := []pagerdutytest.Request{{
+					URL: "/",
+					PostData: pagerdutytest.PostData{
+						ServiceKey:  "service_key",
+						EventType:   "trigger",
+						Description: "message",
+						Client:      "kapacitor",
+						ClientURL:   kapacitorURL,
+						Details:     "details",
+					},
+				}}
+				if !reflect.DeepEqual(exp, got) {
+					return fmt.Errorf("unexpected pagerduty request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+				}
+				return nil
+			},
+		},
+		{
+			handler: client.TopicHandler{
+				Kind: "post",
+			},
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
+				ts := alerttest.NewPostServer()
+
+				ha.Options = map[string]interface{}{"url": ts.URL}
+
+				ctxt := context.WithValue(nil, "server", ts)
+				return ctxt, nil
+			},
+			result: func(ctxt context.Context) error {
+				ts := ctxt.Value("server").(*alerttest.PostServer)
+				ts.Close()
+				exp := []alert.Data{alertData}
+				got := ts.Data()
+				if !reflect.DeepEqual(exp, got) {
+					return fmt.Errorf("unexpected post request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+				}
+				return nil
+			},
+		},
+		{
+			handler: client.TopicHandler{
+				Kind: "post",
+				Options: map[string]interface{}{
+					"endpoint": "test",
+				},
+			},
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
+				ts := httpposttest.NewAlertServer(nil, true)
+				ctxt := context.WithValue(nil, "server", ts)
+				c.HTTPPost = httppost.Configs{{
+					Endpoint:      "test",
+					URL:           ts.URL,
+					AlertTemplate: `{{.Message}}`,
+				}}
+				return ctxt, nil
+			},
+			result: func(ctxt context.Context) error {
+				ts := ctxt.Value("server").(*httpposttest.AlertServer)
+				exp := []httpposttest.AlertRequest{{
+					MatchingHeaders: true,
+					Raw:             []byte("message"),
+				}}
+				got := ts.Data()
+				if !reflect.DeepEqual(exp, got) {
+					return fmt.Errorf("unexpected httppost alert request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+				}
+				return nil
+			},
+		},
+		{
+			handler: client.TopicHandler{
 				Kind:    "pushover",
 				Options: map[string]interface{}{},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := pushovertest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7437,77 +9059,19 @@ func TestServer_AlertHandlers(t *testing.T) {
 					},
 				}}
 				if !reflect.DeepEqual(exp, got) {
-					return fmt.Errorf("unexpected opsgenie request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+					return fmt.Errorf("unexpected pushover request:\nexp\n%+v\ngot\n%+v\n", exp, got)
 				}
 				return nil
 			},
 		},
-
 		{
-			handlerAction: client.HandlerAction{
-				Kind: "pagerduty",
+			handler: client.TopicHandler{
+				Kind: "sensu",
 				Options: map[string]interface{}{
-					"service-key": "service_key",
+					"source": "Kapacitor",
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
-				ts := pagerdutytest.NewServer()
-				ctxt := context.WithValue(nil, "server", ts)
-
-				c.PagerDuty.Enabled = true
-				c.PagerDuty.URL = ts.URL
-				return ctxt, nil
-			},
-			result: func(ctxt context.Context) error {
-				ts := ctxt.Value("server").(*pagerdutytest.Server)
-				kapacitorURL := ctxt.Value("kapacitorURL").(string)
-				ts.Close()
-				got := ts.Requests()
-				exp := []pagerdutytest.Request{{
-					URL: "/",
-					PostData: pagerdutytest.PostData{
-						ServiceKey:  "service_key",
-						EventType:   "trigger",
-						Description: "message",
-						Client:      "kapacitor",
-						ClientURL:   kapacitorURL,
-						Details:     resultJSON,
-					},
-				}}
-				if !reflect.DeepEqual(exp, got) {
-					return fmt.Errorf("unexpected pagerduty request:\nexp\n%+v\ngot\n%+v\n", exp, got)
-				}
-				return nil
-			},
-		},
-		{
-			handlerAction: client.HandlerAction{
-				Kind: "post",
-			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
-				ts := alerttest.NewPostServer()
-
-				ha.Options = map[string]interface{}{"url": ts.URL}
-
-				ctxt := context.WithValue(nil, "server", ts)
-				return ctxt, nil
-			},
-			result: func(ctxt context.Context) error {
-				ts := ctxt.Value("server").(*alerttest.PostServer)
-				ts.Close()
-				exp := []alertservice.AlertData{alertData}
-				got := ts.Data()
-				if !reflect.DeepEqual(exp, got) {
-					return fmt.Errorf("unexpected post request:\nexp\n%+v\ngot\n%+v\n", exp, got)
-				}
-				return nil
-			},
-		},
-		{
-			handlerAction: client.HandlerAction{
-				Kind: "sensu",
-			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts, err := sensutest.NewServer()
 				if err != nil {
 					return nil, err
@@ -7536,13 +9100,13 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "slack",
 				Options: map[string]interface{}{
 					"channel": "#test",
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := slacktest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7577,13 +9141,13 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "smtp",
 				Options: map[string]interface{}{
 					"to": []string{"oncall@example.com", "backup@example.com"},
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts, err := smtptest.NewServer()
 				if err != nil {
 					return nil, err
@@ -7630,7 +9194,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "snmptrap",
 				Options: map[string]interface{}{
 					"trap-oid": "1.1.2",
@@ -7648,7 +9212,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 					},
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts, err := snmptraptest.NewServer()
 				if err != nil {
 					return nil, err
@@ -7658,6 +9222,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 				c.SNMPTrap.Enabled = true
 				c.SNMPTrap.Addr = ts.Addr
 				c.SNMPTrap.Community = ts.Community
+				c.SNMPTrap.Retries = 3
 				return ctxt, nil
 			},
 			result: func(ctxt context.Context) error {
@@ -7669,6 +9234,11 @@ func TestServer_AlertHandlers(t *testing.T) {
 						Type:        snmpgo.SNMPTrapV2,
 						ErrorStatus: snmpgo.NoError,
 						VarBinds: snmptraptest.VarBinds{
+							{
+								Oid:   "1.3.6.1.2.1.1.3.0",
+								Value: "1000",
+								Type:  "TimeTicks",
+							},
 							{
 								Oid:   "1.3.6.1.6.3.1.1.4.1.0",
 								Value: "1.1.2",
@@ -7694,10 +9264,10 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "talk",
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := talktest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7725,10 +9295,10 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "tcp",
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts, err := alerttest.NewTCPServer()
 				if err != nil {
 					return nil, err
@@ -7742,7 +9312,7 @@ func TestServer_AlertHandlers(t *testing.T) {
 			result: func(ctxt context.Context) error {
 				ts := ctxt.Value("server").(*alerttest.TCPServer)
 				ts.Close()
-				exp := []alertservice.AlertData{alertData}
+				exp := []alert.Data{alertData}
 				got := ts.Data()
 				if !reflect.DeepEqual(exp, got) {
 					return fmt.Errorf("unexpected tcp request:\nexp\n%+v\ngot\n%+v\n", exp, got)
@@ -7751,14 +9321,14 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "telegram",
 				Options: map[string]interface{}{
 					"chat-id":                  "chat id",
 					"disable-web-page-preview": true,
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := telegramtest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7788,13 +9358,13 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 		{
-			handlerAction: client.HandlerAction{
+			handler: client.TopicHandler{
 				Kind: "victorops",
 				Options: map[string]interface{}{
 					"routing-key": "key",
 				},
 			},
-			setup: func(c *server.Config, ha *client.HandlerAction) (context.Context, error) {
+			setup: func(c *server.Config, ha *client.TopicHandler) (context.Context, error) {
 				ts := victoropstest.NewServer()
 				ctxt := context.WithValue(nil, "server", ts)
 
@@ -7825,15 +9395,15 @@ func TestServer_AlertHandlers(t *testing.T) {
 			},
 		},
 	}
-	for _, tc := range testCases {
-		t.Run(tc.handlerAction.Kind, func(t *testing.T) {
-			kind := tc.handlerAction.Kind
+	for i, tc := range testCases {
+		t.Run(fmt.Sprintf("%s-%d", tc.handler.Kind, i), func(t *testing.T) {
+			kind := tc.handler.Kind
 			// Create default config
 			c := NewConfig()
 			var ctxt context.Context
 			if tc.setup != nil {
 				var err error
-				ctxt, err = tc.setup(c, &tc.handlerAction)
+				ctxt, err = tc.setup(c, &tc.handler)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -7848,12 +9418,10 @@ func TestServer_AlertHandlers(t *testing.T) {
 			}()
 			ctxt = context.WithValue(ctxt, "kapacitorURL", s.URL())
 
-			if _, err := cli.CreateHandler(client.HandlerOptions{
-				ID:     "testAlertHandlers",
-				Topics: []string{"test"},
-				Actions: []client.HandlerAction{
-					tc.handlerAction,
-				},
+			if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink("test"), client.TopicHandlerOptions{
+				ID:      "testAlertHandlers",
+				Kind:    tc.handler.Kind,
+				Options: tc.handler.Options,
 			}); err != nil {
 				t.Fatalf("%s: %v", kind, err)
 			}
@@ -7953,7 +9521,7 @@ stream
 		Link:  l,
 		Topic: topic,
 		Events: []client.TopicEvent{{
-			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1preview/alerts/topics/%s/events/id", topic)},
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", topic)},
 			ID:   "id",
 			State: client.EventState{
 				Message:  "message",
@@ -7993,7 +9561,7 @@ stream
 		Link:  l,
 		Topic: topic,
 		Events: []client.TopicEvent{{
-			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1preview/alerts/topics/%s/events/id", topic)},
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", topic)},
 			ID:   "id",
 			State: client.EventState{
 				Message:  "message",
@@ -8011,6 +9579,404 @@ stream
 	}
 	if !reflect.DeepEqual(te, expTopicEvents) {
 		t.Errorf("unexpected topic events for anonymous topic after second point:\ngot\n%+v\nexp\n%+v\n", te, expTopicEvents)
+	}
+}
+
+func TestServer_Alert_Aggregate(t *testing.T) {
+	// Setup test TCP server
+	ts, err := alerttest.NewTCPServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	// Create default config
+	c := NewConfig()
+	s := OpenServer(c)
+	cli := Client(s)
+	defer s.Close()
+
+	aggTopic := "agg"
+
+	// Create task for alert
+	tick := `
+stream
+	|from()
+		.measurement('alert')
+	|alert()
+		.id('id')
+		.message('message')
+		.details('details')
+		.crit(lambda: "value" > 1.0)
+		.topic('` + aggTopic + `')
+`
+
+	if _, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:   "agg_task",
+		Type: client.StreamTask,
+		DBRPs: []client.DBRP{{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		}},
+		TICKscript: tick,
+		Status:     client.Enabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create tpc handler on tcp topic
+	tcpTopic := "tcp"
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(tcpTopic), client.TopicHandlerOptions{
+		ID:   "tcp_handler",
+		Kind: "tcp",
+		Options: map[string]interface{}{
+			"address": ts.Addr,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create aggregate handler on agg topic
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(aggTopic), client.TopicHandlerOptions{
+		ID:   "aggregate_handler",
+		Kind: "aggregate",
+		Options: map[string]interface{}{
+			"id":       "id-agg",
+			"interval": 100 * time.Millisecond,
+			"topic":    "tcp",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write points
+	point := `alert value=3 0000000000000
+alert value=4 0000000000001
+alert value=2 0000000000002
+`
+	v := url.Values{}
+	v.Add("precision", "ms")
+	s.MustWrite("mydb", "myrp", point, v)
+
+	time.Sleep(110 * time.Millisecond)
+
+	// Check TCP handler got event
+	alertData := alert.Data{
+		ID:       "id-agg",
+		Message:  "Received 3 events in the last 100ms.",
+		Details:  "message\nmessage\nmessage",
+		Time:     time.Date(1970, 1, 1, 0, 0, 0, 2000000, time.UTC),
+		Level:    alert.Critical,
+		Duration: 2 * time.Millisecond,
+		Data: models.Result{
+			Series: models.Rows{
+				{
+					Name:    "alert",
+					Columns: []string{"time", "value"},
+					Values: [][]interface{}{[]interface{}{
+						time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+						3.0,
+					}},
+				},
+				{
+					Name:    "alert",
+					Columns: []string{"time", "value"},
+					Values: [][]interface{}{[]interface{}{
+						time.Date(1970, 1, 1, 0, 0, 0, 1000000, time.UTC),
+						4.0,
+					}},
+				},
+				{
+					Name:    "alert",
+					Columns: []string{"time", "value"},
+					Values: [][]interface{}{[]interface{}{
+						time.Date(1970, 1, 1, 0, 0, 0, 2000000, time.UTC),
+						2.0,
+					}},
+				},
+			},
+		},
+	}
+	ts.Close()
+	exp := []alert.Data{alertData}
+	got := ts.Data()
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("unexpected tcp request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+	}
+
+	// Check event on topic
+	l := cli.TopicEventsLink(tcpTopic)
+	expTopicEvents := client.TopicEvents{
+		Link:  l,
+		Topic: tcpTopic,
+		Events: []client.TopicEvent{{
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id-agg", tcpTopic)},
+			ID:   "id-agg",
+			State: client.EventState{
+				Message:  "Received 3 events in the last 100ms.",
+				Details:  "message\nmessage\nmessage",
+				Time:     time.Date(1970, 1, 1, 0, 0, 0, 2000000, time.UTC),
+				Duration: client.Duration(2 * time.Millisecond),
+				Level:    "CRITICAL",
+			},
+		}},
+	}
+
+	te, err := cli.ListTopicEvents(l, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(te, expTopicEvents) {
+		t.Errorf("unexpected topic events for aggregate topic:\ngot\n%+v\nexp\n%+v\n", te, expTopicEvents)
+	}
+}
+
+func TestServer_Alert_Publish(t *testing.T) {
+	// Setup test TCP server
+	ts, err := alerttest.NewTCPServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	// Create default config
+	c := NewConfig()
+	s := OpenServer(c)
+	cli := Client(s)
+	defer s.Close()
+
+	publishTopic := "publish"
+
+	// Create task for alert
+	tick := `
+stream
+	|from()
+		.measurement('alert')
+	|alert()
+		.id('id')
+		.message('message')
+		.details('details')
+		.crit(lambda: "value" > 1.0)
+		.topic('` + publishTopic + `')
+`
+
+	if _, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:   "publish_task",
+		Type: client.StreamTask,
+		DBRPs: []client.DBRP{{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		}},
+		TICKscript: tick,
+		Status:     client.Enabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create tpc handler on tcp topic
+	tcpTopic := "tcp"
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(tcpTopic), client.TopicHandlerOptions{
+		ID:   "tcp_handler",
+		Kind: "tcp",
+		Options: map[string]interface{}{
+			"address": ts.Addr,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create publish handler on publish topic
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(publishTopic), client.TopicHandlerOptions{
+		ID:   "publish_handler",
+		Kind: "publish",
+		Options: map[string]interface{}{
+			// Publish to tcpTopic
+			"topics": []string{tcpTopic},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write points
+	point := `alert value=2 0000000000`
+	v := url.Values{}
+	v.Add("precision", "s")
+	s.MustWrite("mydb", "myrp", point, v)
+
+	s.Restart()
+
+	// Check TCP handler got event
+	alertData := alert.Data{
+		ID:      "id",
+		Message: "message",
+		Details: "details",
+		Time:    time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+		Level:   alert.Critical,
+		Data: models.Result{
+			Series: models.Rows{
+				{
+					Name:    "alert",
+					Columns: []string{"time", "value"},
+					Values: [][]interface{}{[]interface{}{
+						time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+						2.0,
+					}},
+				},
+			},
+		},
+	}
+	ts.Close()
+	exp := []alert.Data{alertData}
+	got := ts.Data()
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("unexpected tcp request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+	}
+
+	// Check event on topic
+	l := cli.TopicEventsLink(tcpTopic)
+	expTopicEvents := client.TopicEvents{
+		Link:  l,
+		Topic: tcpTopic,
+		Events: []client.TopicEvent{{
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", tcpTopic)},
+			ID:   "id",
+			State: client.EventState{
+				Message:  "message",
+				Details:  "details",
+				Time:     time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC),
+				Duration: 0,
+				Level:    "CRITICAL",
+			},
+		}},
+	}
+
+	te, err := cli.ListTopicEvents(l, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(te, expTopicEvents) {
+		t.Errorf("unexpected topic events for publish topic:\ngot\n%+v\nexp\n%+v\n", te, expTopicEvents)
+	}
+}
+
+func TestServer_Alert_Match(t *testing.T) {
+	// Setup test TCP server
+	ts, err := alerttest.NewTCPServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	// Create default config
+	c := NewConfig()
+	s := OpenServer(c)
+	cli := Client(s)
+	defer s.Close()
+
+	topic := "test"
+
+	// Create task for alert
+	tick := `
+stream
+	|from()
+		.measurement('alert')
+	|alert()
+		.id('id')
+		.message('message')
+		.details('details')
+		.crit(lambda: "value" > 1.0)
+		.topic('` + topic + `')
+`
+
+	if _, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:   "alert_task",
+		Type: client.StreamTask,
+		DBRPs: []client.DBRP{{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		}},
+		TICKscript: tick,
+		Status:     client.Enabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create tpc handler with match condition
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(topic), client.TopicHandlerOptions{
+		ID:   "tcp_handler",
+		Kind: "tcp",
+		Options: map[string]interface{}{
+			"address": ts.Addr,
+		},
+		Match: `"host" == 'serverA' AND level() == CRITICAL`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write points
+	point := `alert,host=serverA value=0 0000000000
+alert,host=serverB value=2 0000000001
+alert,host=serverB value=0 0000000002
+alert,host=serverA value=2 0000000003
+alert,host=serverB value=0 0000000004
+`
+	v := url.Values{}
+	v.Add("precision", "s")
+	s.MustWrite("mydb", "myrp", point, v)
+
+	s.Restart()
+
+	alertData := alert.Data{
+		ID:      "id",
+		Message: "message",
+		Details: "details",
+		Time:    time.Date(1970, 1, 1, 0, 0, 3, 0, time.UTC),
+		Level:   alert.Critical,
+		Data: models.Result{
+			Series: models.Rows{
+				{
+					Name:    "alert",
+					Tags:    map[string]string{"host": "serverA"},
+					Columns: []string{"time", "value"},
+					Values: [][]interface{}{[]interface{}{
+						time.Date(1970, 1, 1, 0, 0, 3, 0, time.UTC),
+						2.0,
+					}},
+				},
+			},
+		},
+	}
+	ts.Close()
+	exp := []alert.Data{alertData}
+	got := ts.Data()
+	if !reflect.DeepEqual(exp, got) {
+		t.Errorf("unexpected tcp request:\nexp\n%+v\ngot\n%+v\n", exp, got)
+	}
+
+	// Topic should have must recent event
+	l := cli.TopicEventsLink(topic)
+	expTopicEvents := client.TopicEvents{
+		Link:  l,
+		Topic: topic,
+		Events: []client.TopicEvent{{
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", topic)},
+			ID:   "id",
+			State: client.EventState{
+				Message:  "message",
+				Details:  "details",
+				Time:     time.Date(1970, 1, 1, 0, 0, 4, 0, time.UTC),
+				Duration: client.Duration(time.Second),
+				Level:    "OK",
+			},
+		}},
+	}
+
+	te, err := cli.ListTopicEvents(l, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(te, expTopicEvents) {
+		t.Errorf("unexpected topic events for publish topic:\ngot\n%+v\nexp\n%+v\n", te, expTopicEvents)
 	}
 }
 
@@ -8070,7 +10036,7 @@ stream
 		Link:  l,
 		Topic: topic,
 		Events: []client.TopicEvent{{
-			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1preview/alerts/topics/%s/events/id", topic)},
+			Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", topic)},
 			ID:   "id",
 			State: client.EventState{
 				Message:  "message",
@@ -8107,7 +10073,7 @@ stream
 
 	if _, err := cli.ListTopicEvents(l, nil); err == nil {
 		t.Fatal("expected error listing anonymous topic for disabled task")
-	} else if got, exp := err.Error(), fmt.Sprintf("topic %q does not exist", topic); got != exp {
+	} else if got, exp := err.Error(), fmt.Sprintf("failed to get topic events: unknown topic %q", topic); got != exp {
 		t.Errorf("unexpected error message for nonexistent anonymous topic: got %q exp %q", got, exp)
 	}
 
@@ -8143,7 +10109,7 @@ stream
 
 	if _, err := cli.ListTopicEvents(l, nil); err == nil {
 		t.Fatal("expected error listing anonymous topic for deleted task")
-	} else if got, exp := err.Error(), fmt.Sprintf("topic %q does not exist", topic); got != exp {
+	} else if got, exp := err.Error(), fmt.Sprintf("failed to get topic events: unknown topic %q", topic); got != exp {
 		t.Errorf("unexpected error message for nonexistent anonymous topic: got %q exp %q", got, exp)
 	}
 }
@@ -8158,7 +10124,7 @@ func TestServer_AlertTopic_PersistedState(t *testing.T) {
 
 	tmpDir := MustTempDir()
 	defer os.RemoveAll(tmpDir)
-	tmpPath := path.Join(tmpDir, "alert.log")
+	tmpPath := filepath.Join(tmpDir, "alert.log")
 
 	// Create default config
 	c := NewConfig()
@@ -8166,13 +10132,10 @@ func TestServer_AlertTopic_PersistedState(t *testing.T) {
 	cli := Client(s)
 	defer s.Close()
 
-	if _, err := cli.CreateHandler(client.HandlerOptions{
-		ID:     "testAlertHandler",
-		Topics: []string{"test"},
-		Actions: []client.HandlerAction{{
-			Kind:    "tcp",
-			Options: map[string]interface{}{"address": ts.Addr},
-		}},
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink("test"), client.TopicHandlerOptions{
+		ID:      "testAlertHandler",
+		Kind:    "tcp",
+		Options: map[string]interface{}{"address": ts.Addr},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -8221,7 +10184,7 @@ stream
 			Link:  l,
 			Topic: topic,
 			Events: []client.TopicEvent{{
-				Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1preview/alerts/topics/%s/events/id", topic)},
+				Link: client.Link{Relation: client.Self, Href: fmt.Sprintf("/kapacitor/v1/alerts/topics/%s/events/id", topic)},
 				ID:   "id",
 				State: client.EventState{
 					Message:  "message",
@@ -8284,50 +10247,47 @@ func TestServer_AlertListHandlers(t *testing.T) {
 	cli := Client(s)
 	defer s.Close()
 
-	topics := []string{"test"}
-	actions := []client.HandlerAction{{
-		Kind:    "tcp",
-		Options: map[string]interface{}{"address": ts.Addr},
-	}}
+	thl := cli.TopicHandlersLink("test")
 
 	// Number of handlers to create
 	n := 3
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("handler%d", i)
-		if _, err := cli.CreateHandler(client.HandlerOptions{
+		if _, err := cli.CreateTopicHandler(thl, client.TopicHandlerOptions{
 			ID:      id,
-			Topics:  topics,
-			Actions: actions,
+			Kind:    "tcp",
+			Options: map[string]interface{}{"address": ts.Addr},
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	expHandlers := client.Handlers{
-		Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers?pattern="},
-		Handlers: []client.Handler{
+	expHandlers := client.TopicHandlers{
+		Link:  client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/test/handlers?pattern="},
+		Topic: "test",
+		Handlers: []client.TopicHandler{
 			{
-				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/handler0"},
+				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/test/handlers/handler0"},
 				ID:      "handler0",
-				Topics:  topics,
-				Actions: actions,
+				Kind:    "tcp",
+				Options: map[string]interface{}{"address": ts.Addr},
 			},
 			{
-				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/handler1"},
+				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/test/handlers/handler1"},
 				ID:      "handler1",
-				Topics:  topics,
-				Actions: actions,
+				Kind:    "tcp",
+				Options: map[string]interface{}{"address": ts.Addr},
 			},
 			{
-				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/handlers/handler2"},
+				Link:    client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/test/handlers/handler2"},
 				ID:      "handler2",
-				Topics:  topics,
-				Actions: actions,
+				Kind:    "tcp",
+				Options: map[string]interface{}{"address": ts.Addr},
 			},
 		},
 	}
 
-	handlers, err := cli.ListHandlers(nil)
+	handlers, err := cli.ListTopicHandlers(thl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8339,7 +10299,7 @@ func TestServer_AlertListHandlers(t *testing.T) {
 	s.Restart()
 
 	// Check again
-	handlers, err = cli.ListHandlers(nil)
+	handlers, err = cli.ListTopicHandlers(thl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8347,60 +10307,49 @@ func TestServer_AlertListHandlers(t *testing.T) {
 		t.Errorf("unexpected handlers after restart:\ngot\n%+v\nexp\n%+v\n", handlers, expHandlers)
 	}
 
-	var exp client.Handlers
+	var exp client.TopicHandlers
 
 	// Pattern = *
-	handlers, err = cli.ListHandlers(&client.ListHandlersOptions{
+	handlers, err = cli.ListTopicHandlers(thl, &client.ListTopicHandlersOptions{
 		Pattern: "*",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exp = expHandlers
-	exp.Link.Href = "/kapacitor/v1preview/alerts/handlers?pattern=%2A"
+	exp.Link.Href = "/kapacitor/v1/alerts/topics/test/handlers?pattern=%2A"
 	if !reflect.DeepEqual(handlers, exp) {
 		t.Errorf("unexpected handlers with pattern \"*\":\ngot\n%+v\nexp\n%+v\n", handlers, exp)
 	}
 
 	// Pattern = handler*
-	handlers, err = cli.ListHandlers(&client.ListHandlersOptions{
+	handlers, err = cli.ListTopicHandlers(thl, &client.ListTopicHandlersOptions{
 		Pattern: "handler*",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exp = expHandlers
-	exp.Link.Href = "/kapacitor/v1preview/alerts/handlers?pattern=handler%2A"
+	exp.Link.Href = "/kapacitor/v1/alerts/topics/test/handlers?pattern=handler%2A"
 	if !reflect.DeepEqual(handlers, exp) {
-		t.Errorf("unexpected handlers with pattern \"test\":\ngot\n%+v\nexp\n%+v\n", handlers, exp)
+		t.Errorf("unexpected handlers with pattern \"handler*\":\ngot\n%+v\nexp\n%+v\n", handlers, exp)
 	}
 
 	// Pattern = handler0
-	handlers, err = cli.ListHandlers(&client.ListHandlersOptions{
+	handlers, err = cli.ListTopicHandlers(thl, &client.ListTopicHandlersOptions{
 		Pattern: "handler0",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exp = expHandlers
-	exp.Link.Href = "/kapacitor/v1preview/alerts/handlers?pattern=handler0"
+	exp.Link.Href = "/kapacitor/v1/alerts/topics/test/handlers?pattern=handler0"
 	exp.Handlers = expHandlers.Handlers[0:1]
 	if !reflect.DeepEqual(handlers, exp) {
-		t.Errorf("unexpected handlers with pattern \"test\":\ngot\n%+v\nexp\n%+v\n", handlers, exp)
-	}
-
-	// List handlers of test topic
-	l := cli.TopicHandlersLink("test")
-	topicHandlers, err := cli.ListTopicHandlers(l)
-	expTopicHandlers := client.TopicHandlers{
-		Link:     client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics/test/handlers"},
-		Topic:    "test",
-		Handlers: expHandlers.Handlers,
-	}
-	if !reflect.DeepEqual(topicHandlers, expTopicHandlers) {
-		t.Errorf("unexpected topic handlers:\ngot\n%+v\nexp\n%+v\n", topicHandlers, expTopicHandlers)
+		t.Errorf("unexpected handlers with pattern \"handler0\":\ngot\n%+v\nexp\n%+v\n", handlers, exp)
 	}
 }
+
 func TestServer_AlertTopic(t *testing.T) {
 	// Create default config
 	c := NewConfig()
@@ -8408,24 +10357,21 @@ func TestServer_AlertTopic(t *testing.T) {
 	cli := Client(s)
 	defer s.Close()
 
-	if _, err := cli.CreateHandler(client.HandlerOptions{
-		ID:     "testAlertHandler",
-		Topics: []string{"misc"},
-		Actions: []client.HandlerAction{{
-			Kind:    "tcp",
-			Options: map[string]interface{}{"address": "localhost:4657"},
-		}},
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink("misc"), client.TopicHandlerOptions{
+		ID:      "testAlertHandler",
+		Kind:    "tcp",
+		Options: map[string]interface{}{"address": "localhost:4657"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	expTopic := client.Topic{
-		Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics/misc"},
+		Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/misc"},
 		ID:           "misc",
 		Level:        "OK",
 		Collected:    0,
-		EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1preview/alerts/topics/misc/events"},
-		HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1preview/alerts/topics/misc/handlers"},
+		EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1/alerts/topics/misc/events"},
+		HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1/alerts/topics/misc/handlers"},
 	}
 	topic, err := cli.Topic(cli.TopicLink("misc"))
 	if err != nil {
@@ -8450,40 +10396,39 @@ func TestServer_AlertListTopics(t *testing.T) {
 	cli := Client(s)
 	defer s.Close()
 
-	if _, err := cli.CreateHandler(client.HandlerOptions{
-		ID:     "testAlertHandler",
-		Topics: []string{"test", "system", "misc"},
-		Actions: []client.HandlerAction{{
+	for _, topic := range []string{"system", "misc", "test"} {
+		if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink(topic), client.TopicHandlerOptions{
+			ID:      "testAlertHandler",
 			Kind:    "tcp",
 			Options: map[string]interface{}{"address": ts.Addr},
-		}},
-	}); err != nil {
-		t.Fatal(err)
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	expTopics := client.Topics{
-		Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics?min-level=OK&pattern="},
+		Link: client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics?min-level=OK&pattern="},
 		Topics: []client.Topic{
 			{
-				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics/misc"},
+				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/misc"},
 				ID:           "misc",
 				Level:        "OK",
-				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1preview/alerts/topics/misc/events"},
-				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1preview/alerts/topics/misc/handlers"},
+				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1/alerts/topics/misc/events"},
+				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1/alerts/topics/misc/handlers"},
 			},
 			{
-				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics/system"},
+				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/system"},
 				ID:           "system",
 				Level:        "OK",
-				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1preview/alerts/topics/system/events"},
-				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1preview/alerts/topics/system/handlers"},
+				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1/alerts/topics/system/events"},
+				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1/alerts/topics/system/handlers"},
 			},
 			{
-				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1preview/alerts/topics/test"},
+				Link:         client.Link{Relation: client.Self, Href: "/kapacitor/v1/alerts/topics/test"},
 				ID:           "test",
 				Level:        "OK",
-				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1preview/alerts/topics/test/events"},
-				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1preview/alerts/topics/test/handlers"},
+				EventsLink:   client.Link{Relation: "events", Href: "/kapacitor/v1/alerts/topics/test/events"},
+				HandlersLink: client.Link{Relation: "handlers", Href: "/kapacitor/v1/alerts/topics/test/handlers"},
 			},
 		},
 	}
@@ -8550,7 +10495,7 @@ stream
 		t.Fatal(err)
 	}
 	exp = expTopics
-	exp.Link.Href = "/kapacitor/v1preview/alerts/topics?min-level=OK&pattern=%2A"
+	exp.Link.Href = "/kapacitor/v1/alerts/topics?min-level=OK&pattern=%2A"
 	if !reflect.DeepEqual(topics, exp) {
 		t.Errorf("unexpected topics with pattern \"*\":\ngot\n%+v\nexp\n%+v\n", topics, exp)
 	}
@@ -8563,7 +10508,7 @@ stream
 		t.Fatal(err)
 	}
 	exp = expTopics
-	exp.Link.Href = "/kapacitor/v1preview/alerts/topics?min-level=OK&pattern=test"
+	exp.Link.Href = "/kapacitor/v1/alerts/topics?min-level=OK&pattern=test"
 	exp.Topics = expTopics.Topics[2:]
 	if !reflect.DeepEqual(topics, exp) {
 		t.Errorf("unexpected topics with pattern \"test\":\ngot\n%+v\nexp\n%+v\n", topics, exp)
@@ -8577,14 +10522,14 @@ stream
 		t.Fatal(err)
 	}
 	exp = expTopics
-	exp.Link.Href = "/kapacitor/v1preview/alerts/topics?min-level=INFO&pattern="
+	exp.Link.Href = "/kapacitor/v1/alerts/topics?min-level=INFO&pattern="
 	exp.Topics = expTopics.Topics[2:]
 	if !reflect.DeepEqual(topics, exp) {
 		t.Errorf("unexpected topics min level \"info\":\ngot\n%+v\nexp\n%+v\n", topics, exp)
 	}
 }
 
-func TestServer_AlertHandler_MultipleActions(t *testing.T) {
+func TestServer_AlertHandler_MultipleHandlers(t *testing.T) {
 	resultJSON := `{"series":[{"name":"alert","columns":["time","value"],"values":[["1970-01-01T00:00:00Z",1]]}]}`
 
 	// Create default config
@@ -8610,22 +10555,20 @@ func TestServer_AlertHandler_MultipleActions(t *testing.T) {
 		}
 	}()
 
-	if _, err := cli.CreateHandler(client.HandlerOptions{
-		ID:     "testAlertHandlers",
-		Topics: []string{"test"},
-		Actions: []client.HandlerAction{
-			{
-				Kind: "victorops",
-				Options: map[string]interface{}{
-					"routing-key": "key",
-				},
-			},
-			{
-				Kind: "slack",
-				Options: map[string]interface{}{
-					"channel": "#test",
-				},
-			},
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink("test"), client.TopicHandlerOptions{
+		ID:   "testAlertHandlers-VO",
+		Kind: "victorops",
+		Options: map[string]interface{}{
+			"routing-key": "key",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.CreateTopicHandler(cli.TopicHandlersLink("test"), client.TopicHandlerOptions{
+		ID:   "testAlertHandlers-Slack",
+		Kind: "slack",
+		Options: map[string]interface{}{
+			"channel": "#test",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -8708,4 +10651,387 @@ stream
 			t.Errorf("unexpected victorops request:\nexp\n%+v\ngot\n%+v\n", exp, got)
 		}
 	}
+}
+
+func TestStorage_Rebuild(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	storages, err := cli.ListStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, storage := range storages.Storage {
+		t.Log(storage.Link)
+		err := cli.DoStorageAction(storage.Link, client.StorageActionOptions{
+			Action: client.StorageRebuild,
+		})
+		if err != nil {
+			t.Errorf("error rebuilding storage %q: %v", storage.Name, err)
+		}
+	}
+}
+
+func TestStorage_Backup(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	// Create a task
+	id := "testTaskID"
+	ttype := client.StreamTask
+	dbrps := []client.DBRP{
+		{
+			Database:        "mydb",
+			RetentionPolicy: "myrp",
+		},
+		{
+			Database:        "otherdb",
+			RetentionPolicy: "default",
+		},
+	}
+	tick := `stream
+    |from()
+        .measurement('test')
+`
+	task, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		Type:       ttype,
+		DBRPs:      dbrps,
+		TICKscript: tick,
+		Status:     client.Disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Perform backup
+	size, r, err := cli.Backup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	backup, err := ioutil.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, exp := int64(len(backup)), size; got != exp {
+		t.Fatalf("unexpected backup size got %d exp %d", got, exp)
+	}
+
+	// Stop the server
+	s.Stop()
+
+	// Restore from backup
+	if err := ioutil.WriteFile(s.Config.Storage.BoltDBPath, backup, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start the server again
+	s.Start()
+
+	// Check that the task was restored
+	ti, err := cli.Task(task.Link, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ti.Error != "" {
+		t.Fatal(ti.Error)
+	}
+	if ti.ID != id {
+		t.Fatalf("unexpected id got %s exp %s", ti.ID, id)
+	}
+	if ti.Type != client.StreamTask {
+		t.Fatalf("unexpected type got %v exp %v", ti.Type, client.StreamTask)
+	}
+	if ti.Status != client.Disabled {
+		t.Fatalf("unexpected status got %v exp %v", ti.Status, client.Disabled)
+	}
+	if !reflect.DeepEqual(ti.DBRPs, dbrps) {
+		t.Fatalf("unexpected dbrps got %s exp %s", ti.DBRPs, dbrps)
+	}
+	if ti.TICKscript != tick {
+		t.Fatalf("unexpected TICKscript got %s exp %s", ti.TICKscript, tick)
+	}
+	dot := "digraph testTaskID {\nstream0 -> from1;\n}"
+	if ti.Dot != dot {
+		t.Fatalf("unexpected dot\ngot\n%s\nexp\n%s\n", ti.Dot, dot)
+	}
+}
+
+func TestLoadService(t *testing.T) {
+	s, c, cli := OpenLoadServer()
+
+	// If the list of test fixtures changes update this list
+	tasks := []string{"base", "cpu_alert", "implicit", "join", "other"}
+	ts, err := cli.ListTasks(nil)
+	if err != nil {
+		t.Fatalf("enountered error listing tasks: %v", err)
+	}
+	for i, task := range ts {
+		if exp, got := tasks[i], task.ID; exp != got {
+			t.Fatalf("expected task ID to be %v, got %v\n", exp, got)
+		}
+	}
+
+	// If the list of test fixtures changes update this list
+	templates := []string{"base_template", "implicit_template"}
+	tmps, err := cli.ListTemplates(nil)
+	if err != nil {
+		t.Fatalf("enountered error listing tasks: %v", err)
+	}
+	for i, template := range tmps {
+		if exp, got := templates[i], template.ID; exp != got {
+			t.Fatalf("expected template ID to be %v, got %v\n", exp, got)
+		}
+	}
+
+	// If the list of test fixtures changes update this list
+	topicHandlers := []string{"example", "other"}
+	link := cli.TopicHandlersLink("cpu")
+	ths, err := cli.ListTopicHandlers(link, nil)
+	if err != nil {
+		t.Fatalf("enountered error listing tasks: %v", err)
+	}
+	for i, th := range ths.Handlers {
+		if exp, got := topicHandlers[i], th.ID; exp != got {
+			t.Fatalf("expected topic-handler ID to be %v, got %v\n", exp, got)
+		}
+	}
+
+	// delete task file
+	err = os.Rename(
+		path.Join(c.Load.Dir, "tasks", "join.tick"),
+		path.Join(c.Load.Dir, "tasks", "z.tick"),
+	)
+	if err != nil {
+		t.Fatalf("failed to rename tickscript: %v", err)
+	}
+
+	// reload
+	s.Reload()
+
+	// If the list of test fixtures changes update this list
+	tasks = []string{"base", "cpu_alert", "implicit", "other", "z"}
+	ts, err = cli.ListTasks(nil)
+	if err != nil {
+		t.Fatalf("enountered error listing tasks: %v", err)
+	}
+	for i, task := range ts {
+		if exp, got := tasks[i], task.ID; exp != got {
+			t.Fatalf("expected task ID to be %v, got %v\n", exp, got)
+		}
+	}
+
+	// rename template file
+	err = os.Rename(
+		path.Join(c.Load.Dir, "templates", "base_template.tick"),
+		path.Join(c.Load.Dir, "templates", "new.tick"),
+	)
+	if err != nil {
+		t.Fatalf("failed to rename tickscript: %v", err)
+	}
+
+	// reload
+	s.Reload()
+
+	// If the list of test fixtures changes update this list
+	templates = []string{"implicit_template", "new"}
+	tmps, err = cli.ListTemplates(nil)
+	if err != nil {
+		t.Fatalf("enountered error listing templates: %v", err)
+	}
+	for i, template := range tmps {
+		if exp, got := templates[i], template.ID; exp != got {
+			t.Fatalf("expected template ID to be %v, got %v\n", exp, got)
+		}
+	}
+	// move template file back
+	err = os.Rename(
+		path.Join(c.Load.Dir, "templates", "new.tick"),
+		path.Join(c.Load.Dir, "templates", "base_template.tick"),
+	)
+
+	// add a new handler
+	f, err := os.Create(path.Join(c.Load.Dir, "handlers", "new.tick"))
+	if err != nil {
+		t.Fatalf("failed to create new handler file: %v", err)
+	}
+
+	script := `topic: cpu
+id: new
+kind: slack
+match: changed() == TRUE
+options:
+  channel: '#alerts'
+`
+
+	if _, err := f.Write([]byte(script)); err != nil {
+		t.Fatalf("failed to write handler: %v", err)
+	}
+	f.Close()
+
+	// remove handler file back
+	if err := os.Remove(path.Join(c.Load.Dir, "handlers", "other.yaml")); err != nil {
+		t.Fatalf("failed to remove handler file: %v", err)
+	}
+
+	// reload
+	s.Reload()
+
+	// If the list of test fixtures changes update this list
+	topicHandlers = []string{"example", "new"}
+	link = cli.TopicHandlersLink("cpu")
+	ths, err = cli.ListTopicHandlers(link, nil)
+	if err != nil {
+		t.Fatalf("enountered error listing topic-handlers: %v", err)
+	}
+	for i, th := range ths.Handlers {
+		if exp, got := topicHandlers[i], th.ID; exp != got {
+			t.Fatalf("expected topic-handler ID to be %v, got %v\n", exp, got)
+		}
+	}
+
+}
+
+func TestSideloadService(t *testing.T) {
+	dir := MustTempDir()
+	defer os.RemoveAll(dir)
+
+	if err := copyFiles("testdata/sideload", dir); err != nil {
+		t.Fatal(err)
+	}
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	id := "testSideloadTask"
+	ttype := client.StreamTask
+	dbrps := []client.DBRP{{
+		Database:        "mydb",
+		RetentionPolicy: "myrp",
+	}}
+	tick := fmt.Sprintf(`stream
+	|from()
+		.measurement('test')
+	|sideload()
+		.source('file://%s')
+		.order('host/{{.host}}.yml', 'service/{{.service}}.yml', 'region/{{.region}}.yml')
+		.field('cpu_usage_idle_warn', 30.0)
+		.field('cpu_usage_idle_crit', 15.0)
+	|httpOut('sideload')
+`, dir)
+
+	_, err := cli.CreateTask(client.CreateTaskOptions{
+		ID:         id,
+		Type:       ttype,
+		DBRPs:      dbrps,
+		TICKscript: tick,
+		Status:     client.Enabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	endpoint := fmt.Sprintf("%s/tasks/%s/sideload", s.URL(), id)
+
+	// Request data before any writes and expect null responses
+	nullResponse := `{"series":null}`
+	err = s.HTTPGetRetry(endpoint, nullResponse, 100, time.Millisecond*5)
+	if err != nil {
+		t.Error(err)
+	}
+
+	points := `test,host=host002,service=cart,region=us-east-1 value=1 0000000000`
+	v := url.Values{}
+	v.Add("precision", "s")
+	s.MustWrite("mydb", "myrp", points, v)
+
+	exp := `{"series":[{"name":"test","tags":{"host":"host002","region":"us-east-1","service":"cart"},"columns":["time","cpu_usage_idle_crit","cpu_usage_idle_warn","value"],"values":[["1970-01-01T00:00:00Z",4,10,1]]}]}`
+	err = s.HTTPGetRetry(endpoint, exp, 100, time.Millisecond*5)
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Update source file
+	host002Override := `
+---
+cpu_usage_idle_warn: 8
+`
+	f, err := os.Create(filepath.Join(dir, "host/host002.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.Copy(f, strings.NewReader(host002Override))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// reload
+	s.Reload()
+
+	// Write new points
+	points = `test,host=host002,service=cart,region=us-east-1 value=2 0000000001`
+	s.MustWrite("mydb", "myrp", points, v)
+
+	exp = `{"series":[{"name":"test","tags":{"host":"host002","region":"us-east-1","service":"cart"},"columns":["time","cpu_usage_idle_crit","cpu_usage_idle_warn","value"],"values":[["1970-01-01T00:00:01Z",5,8,2]]}]}`
+	err = s.HTTPGetRetry(endpoint, exp, 100, time.Millisecond*5)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+func TestLogSessions_HeaderJSON(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	u := cli.BaseURL()
+	u.Path = "/logs"
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if exp, got := "application/json; charset=utf-8", resp.Header.Get("Content-Type"); exp != got {
+		t.Fatalf("expected: %v, got: %v\n", exp, got)
+		return
+	}
+
+}
+
+func TestLogSessions_HeaderGzip(t *testing.T) {
+	s, cli := OpenDefaultServer()
+	defer s.Close()
+
+	u := cli.BaseURL()
+	u.Path = "/logs"
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if exp, got := "", resp.Header.Get("Content-Encoding"); exp != got {
+		t.Fatalf("expected: %v, got: %v\n", exp, got)
+		return
+	}
+
 }

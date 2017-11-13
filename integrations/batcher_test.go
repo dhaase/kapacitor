@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/influxdata/kapacitor/clock"
 	"github.com/influxdata/kapacitor/models"
 	alertservice "github.com/influxdata/kapacitor/services/alert"
+	"github.com/influxdata/kapacitor/services/httppost"
 	"github.com/influxdata/kapacitor/services/storage/storagetest"
 	"github.com/influxdata/wlog"
 )
@@ -25,7 +25,8 @@ import (
 func TestBatch_InvalidQuery(t *testing.T) {
 
 	// Create a new execution env
-	tm := kapacitor.NewTaskMaster("invalidQuery", logService)
+	d := diagService.NewKapacitorHandler()
+	tm := kapacitor.NewTaskMaster("invalidQuery", newServerInfo(), d)
 	tm.HTTPDService = newHTTPDService()
 	tm.TaskStore = taskStore{}
 	tm.DeadmanService = deadman{}
@@ -83,10 +84,6 @@ batch
 				Columns: []string{"time", "value"},
 				Values: [][]interface{}{
 					{
-						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
-						0.5,
-					},
-					{
 						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
 						0.5,
 					},
@@ -97,6 +94,61 @@ batch
 					{
 						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
 						0.5,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+						1.0,
+					},
+				},
+			},
+		},
+	}
+
+	testBatcherWithOutput(t, "TestBatch_Derivative", script, 21*time.Second, er, false)
+}
+
+func TestBatch_DerivativeAs(t *testing.T) {
+
+	var script = `
+batch
+	|query('''
+		SELECT sum("value") as "value"
+		FROM "telegraf"."default".packets
+''')
+		.period(10s)
+		.every(10s)
+		.groupBy(time(2s))
+	|derivative('value')
+		.as('derivative')
+	|httpOut('TestBatch_Derivative')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "packets",
+				Tags:    nil,
+				Columns: []string{"time", "derivative", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+						0.5,
+						1001.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						0.5,
+						1002.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						0.5,
+						1003.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+						1.0,
+						1005.0,
 					},
 				},
 			},
@@ -130,10 +182,6 @@ batch
 				Columns: []string{"time", "value"},
 				Values: [][]interface{}{
 					{
-						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
-						1.0,
-					},
-					{
 						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
 						1.0,
 					},
@@ -144,6 +192,10 @@ batch
 					{
 						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
 						1.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+						2.0,
 					},
 				},
 			},
@@ -176,19 +228,19 @@ batch
 				Columns: []string{"time", "value"},
 				Values: [][]interface{}{
 					{
-						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
-						0.5,
-					},
-					{
 						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
 						0.5,
 					},
 					{
 						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
-						-501.0,
+						0.5,
 					},
 					{
 						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						-501.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
 						0.5,
 					},
 				},
@@ -223,15 +275,15 @@ batch
 				Columns: []string{"time", "value"},
 				Values: [][]interface{}{
 					{
-						time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
-						0.5,
-					},
-					{
 						time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
 						0.5,
 					},
 					{
-						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						0.5,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
 						0.5,
 					},
 				},
@@ -298,7 +350,6 @@ batch
 		.period(10s)
 		.every(10s)
 	|difference('value')
-	|log()
 	|httpOut('TestBatch_Difference')
 `
 
@@ -769,6 +820,40 @@ batch
 	}
 
 	testBatcherWithOutput(t, "TestBatch_Default", script, 30*time.Second, er, false)
+}
+
+func TestBatch_DefaultEmptyTag(t *testing.T) {
+
+	var script = `
+batch
+	|query('''
+		SELECT mean("value")
+		FROM "telegraf"."default".cpu_usage_idle
+		WHERE "host" = 'serverA' AND "cpu" = 'cpu-total'
+''')
+	.every(10s)
+	|default()
+		.field('mean', 90.0)
+		.tag('dc', 'sfc')
+	|sum('mean')
+	|httpOut('TestBatch_DefaultEmptyTag')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"dc": "sfc", "cpu": "cpu-total"},
+				Columns: []string{"time", "sum"},
+				Values: [][]interface{}{[]interface{}{
+					time.Date(1971, 1, 1, 0, 0, 18, 0, time.UTC),
+					441.0,
+				}},
+			},
+		},
+	}
+
+	testBatcherWithOutput(t, "TestBatch_DefaultEmptyTag", script, 30*time.Second, er, false)
 }
 
 func TestBatch_Delete(t *testing.T) {
@@ -1355,7 +1440,7 @@ batch
 func TestBatch_AlertStateChangesOnly(t *testing.T) {
 	requestCount := int32(0)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ad := alertservice.AlertData{}
+		ad := alert.Data{}
 		dec := json.NewDecoder(r.Body)
 		err := dec.Decode(&ad)
 		if err != nil {
@@ -1363,23 +1448,25 @@ func TestBatch_AlertStateChangesOnly(t *testing.T) {
 		}
 		atomic.AddInt32(&requestCount, 1)
 		if rc := atomic.LoadInt32(&requestCount); rc == 1 {
-			expAd := alertservice.AlertData{
-				ID:      "cpu_usage_idle:cpu=cpu-total",
-				Message: "cpu_usage_idle:cpu=cpu-total is CRITICAL",
-				Time:    time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
-				Level:   alert.Critical,
+			expAd := alert.Data{
+				ID:            "cpu_usage_idle:cpu=cpu-total",
+				Message:       "cpu_usage_idle:cpu=cpu-total is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+				Level:         alert.Critical,
+				PreviousLevel: alert.OK,
 			}
 			ad.Data = models.Result{}
 			if eq, msg := compareAlertData(expAd, ad); !eq {
 				t.Error(msg)
 			}
 		} else {
-			expAd := alertservice.AlertData{
-				ID:       "cpu_usage_idle:cpu=cpu-total",
-				Message:  "cpu_usage_idle:cpu=cpu-total is OK",
-				Time:     time.Date(1971, 1, 1, 0, 0, 38, 0, time.UTC),
-				Duration: 38 * time.Second,
-				Level:    alert.OK,
+			expAd := alert.Data{
+				ID:            "cpu_usage_idle:cpu=cpu-total",
+				Message:       "cpu_usage_idle:cpu=cpu-total is OK",
+				Time:          time.Date(1971, 1, 1, 0, 0, 38, 0, time.UTC),
+				Duration:      38 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Critical,
 			}
 			ad.Data = models.Result{}
 			if eq, msg := compareAlertData(expAd, ad); !eq {
@@ -1420,7 +1507,7 @@ batch
 func TestBatch_AlertStateChangesOnlyExpired(t *testing.T) {
 	requestCount := int32(0)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ad := alertservice.AlertData{}
+		ad := alert.Data{}
 		dec := json.NewDecoder(r.Body)
 		err := dec.Decode(&ad)
 		if err != nil {
@@ -1428,24 +1515,36 @@ func TestBatch_AlertStateChangesOnlyExpired(t *testing.T) {
 		}
 		// We don't care about the data for this test
 		ad.Data = models.Result{}
-		var expAd alertservice.AlertData
+		var expAd alert.Data
 		atomic.AddInt32(&requestCount, 1)
 		rc := atomic.LoadInt32(&requestCount)
-		if rc < 3 {
-			expAd = alertservice.AlertData{
-				ID:       "cpu_usage_idle:cpu=cpu-total",
-				Message:  "cpu_usage_idle:cpu=cpu-total is CRITICAL",
-				Time:     time.Date(1971, 1, 1, 0, 0, int(rc-1)*20, 0, time.UTC),
-				Duration: time.Duration(rc-1) * 20 * time.Second,
-				Level:    alert.Critical,
+		switch rc {
+		case 1:
+			expAd = alert.Data{
+				ID:            "cpu_usage_idle:cpu=cpu-total",
+				Message:       "cpu_usage_idle:cpu=cpu-total is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, int(rc-1)*20, 0, time.UTC),
+				Duration:      time.Duration(rc-1) * 20 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.OK,
 			}
-		} else {
-			expAd = alertservice.AlertData{
-				ID:       "cpu_usage_idle:cpu=cpu-total",
-				Message:  "cpu_usage_idle:cpu=cpu-total is OK",
-				Time:     time.Date(1971, 1, 1, 0, 0, 38, 0, time.UTC),
-				Duration: 38 * time.Second,
-				Level:    alert.OK,
+		case 2:
+			expAd = alert.Data{
+				ID:            "cpu_usage_idle:cpu=cpu-total",
+				Message:       "cpu_usage_idle:cpu=cpu-total is CRITICAL",
+				Time:          time.Date(1971, 1, 1, 0, 0, int(rc-1)*20, 0, time.UTC),
+				Duration:      time.Duration(rc-1) * 20 * time.Second,
+				Level:         alert.Critical,
+				PreviousLevel: alert.Critical,
+			}
+		case 3:
+			expAd = alert.Data{
+				ID:            "cpu_usage_idle:cpu=cpu-total",
+				Message:       "cpu_usage_idle:cpu=cpu-total is OK",
+				Time:          time.Date(1971, 1, 1, 0, 0, 38, 0, time.UTC),
+				Duration:      38 * time.Second,
+				Level:         alert.OK,
+				PreviousLevel: alert.Critical,
 			}
 		}
 		if eq, msg := compareAlertData(expAd, ad); !eq {
@@ -2326,6 +2425,732 @@ batch
 	testBatcherWithOutput(t, "TestBatch_JoinOn_Fill", script, 30*time.Second, er, true)
 }
 
+func TestBatch_StateDuration(t *testing.T) {
+	var script = `
+var data = batch
+	|query('SELECT value FROM "telegraf"."default"."cpu"')
+		.period(4s)
+		.every(4s)
+		.groupBy('host')
+data
+	|stateDuration(lambda: "value" > 95)
+		.unit(1ms)
+		.as('my_duration')
+	|httpOut('TestBatch_StateTracking')
+data
+	|stateDuration(lambda: "value" > 95) // discard
+`
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverA"},
+				Columns: []string{"time", "my_duration", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						0.0,
+						97.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+						1000.0,
+						96.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						-1.0,
+						83.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+						0.0,
+						99.1,
+					},
+				},
+			},
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverB"},
+				Columns: []string{"time", "my_duration", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						-1.0,
+						47.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+						0.0,
+						95.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+						2000.0,
+						96.1,
+					},
+				},
+			},
+		},
+	}
+
+	testBatcherWithOutput(t, "TestBatch_StateTracking", script, 8*time.Second, er, false)
+}
+
+func TestBatch_StateCount(t *testing.T) {
+	var script = `
+var data = batch
+	|query('SELECT value FROM "telegraf"."default"."cpu"')
+		.period(4s)
+		.every(4s)
+		.groupBy('host')
+data
+	|stateCount(lambda: "value" > 95)
+		.as('my_count')
+	|httpOut('TestBatch_StateTracking')
+data
+	|stateCount(lambda: "value" > 95) // discard
+`
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverA"},
+				Columns: []string{"time", "my_count", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						1.0,
+						97.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+						2.0,
+						96.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+						-1.0,
+						83.6,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+						1.0,
+						99.1,
+					},
+				},
+			},
+			{
+				Name:    "cpu",
+				Tags:    map[string]string{"host": "serverB"},
+				Columns: []string{"time", "my_count", "value"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+						-1.0,
+						47.0,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 5, 0, time.UTC),
+						1.0,
+						95.1,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 7, 0, time.UTC),
+						2.0,
+						96.1,
+					},
+				},
+			},
+		},
+	}
+
+	testBatcherWithOutput(t, "TestBatch_StateTracking", script, 8*time.Second, er, false)
+}
+
+func TestBatch_HttpPost(t *testing.T) {
+	requestCount := int32(0)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		atomic.AddInt32(&requestCount, 1)
+		rc := atomic.LoadInt32(&requestCount)
+
+		var er models.Result
+		switch rc {
+		case 1:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu-total"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+								90.38281469458698,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+								86.51447101892941,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+								91.71877558217454,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+								87.10524436107617,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+								90.3900735196668,
+							},
+						},
+					},
+				},
+			}
+		case 2:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu0"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+								83.56930693069836,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+								79.12871287128638,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+								88.99559823928229,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+								85.50000000000182,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+								86.02860286029956,
+							},
+						},
+					},
+				},
+			}
+		case 3:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu1"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 0, 0, time.UTC),
+								93.49999999999409,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 2, 0, time.UTC),
+								91.44444444443974,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 4, 0, time.UTC),
+								93.44897959187637,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 6, 0, time.UTC),
+								95.99999999995998,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 8, 0, time.UTC),
+								97.00970097012197,
+							},
+						},
+					},
+				},
+			}
+		case 4:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu-total"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+								90.8919959776013,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 12, 0, time.UTC),
+								86.54244306420236,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 14, 0, time.UTC),
+								91.01699558842134,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 16, 0, time.UTC),
+								85.66378399063848,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 18, 0, time.UTC),
+								89.90919811320221,
+							},
+						},
+					},
+				},
+			}
+		case 5:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu0"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+								81.72501716191164,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 12, 0, time.UTC),
+								81.03810381037587,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 14, 0, time.UTC),
+								85.93434343435388,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 16, 0, time.UTC),
+								85.36734693878043,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 18, 0, time.UTC),
+								83.01320528210614,
+							},
+						},
+					},
+				},
+			}
+		case 6:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu1"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 10, 0, time.UTC),
+								95.98484848485191,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 12, 0, time.UTC),
+								92.098039215696,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 14, 0, time.UTC),
+								92.99999999998363,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 16, 0, time.UTC),
+								86.54015887023496,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 18, 0, time.UTC),
+								95.48979591840603,
+							},
+						},
+					},
+				},
+			}
+		case 7:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu-total"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+								91.06416290101595,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+								85.9694442394385,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+								90.62985736134186,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+								86.45443196005628,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+								88.97243107764031,
+							},
+						},
+					},
+				},
+			}
+		case 8:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu0"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+								85.08910891088406,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+								78.00000000002001,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+								84.23607066586464,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+								80.85858585861834,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+								80.61224489791657,
+							},
+						},
+					},
+				},
+			}
+		case 9:
+			er = models.Result{
+				Series: models.Rows{
+					{
+						Name:    "cpu_usage_idle",
+						Tags:    map[string]string{"cpu": "cpu1"},
+						Columns: []string{"time", "mean"},
+						Values: [][]interface{}{
+							{
+								time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+								96.49999999996908,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+								93.46464646468584,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+								95.00950095007724,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+								92.99999999998636,
+							},
+							{
+								time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+								90.99999999998545,
+							},
+						},
+					},
+				},
+			}
+		}
+		if eq, msg := compareResults(er, result); !eq {
+			t.Errorf("unexpected alert data for request: %d %s", rc, msg)
+		}
+	}))
+	defer ts.Close()
+
+	var script = `
+batch
+	|query('''
+		SELECT mean("value")
+		FROM "telegraf"."default".cpu_usage_idle
+		WHERE "host" = 'serverA' AND "cpu" != 'cpu-total'
+''')
+		.period(10s)
+		.every(10s)
+		.groupBy(time(2s), 'cpu')
+	|httpPost('` + ts.URL + `')
+	|httpOut('TestBatch_HttpPost')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu-total"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						91.06416290101595,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						85.9694442394385,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						90.62985736134186,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						86.45443196005628,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						88.97243107764031,
+					},
+				},
+			},
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu0"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						85.08910891088406,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						78.00000000002001,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						84.23607066586464,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						80.85858585861834,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						80.61224489791657,
+					},
+				},
+			},
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu1"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						96.49999999996908,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						93.46464646468584,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						95.00950095007724,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						92.99999999998636,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						90.99999999998545,
+					},
+				},
+			},
+		},
+	}
+
+	testBatcherWithOutput(t, "TestBatch_HttpPost", script, 30*time.Second, er, false)
+}
+
+func TestBatch_HttpPost_Timeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		result := models.Result{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer ts.Close()
+
+	var script = `
+batch
+	|query('''
+		SELECT mean("value")
+		FROM "telegraf"."default".cpu_usage_idle
+		WHERE "host" = 'serverA' AND "cpu" != 'cpu-total'
+''')
+		.period(10s)
+		.every(10s)
+		.groupBy(time(2s), 'cpu')
+	|httpPost('` + ts.URL + `').timeout(1ms)
+	|httpOut('TestBatch_HttpPost_Timeout')
+`
+
+	er := models.Result{
+		Series: models.Rows{
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu-total"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						91.06416290101595,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						85.9694442394385,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						90.62985736134186,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						86.45443196005628,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						88.97243107764031,
+					},
+				},
+			},
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu0"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						85.08910891088406,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						78.00000000002001,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						84.23607066586464,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						80.85858585861834,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						80.61224489791657,
+					},
+				},
+			},
+			{
+				Name:    "cpu_usage_idle",
+				Tags:    map[string]string{"cpu": "cpu1"},
+				Columns: []string{"time", "mean"},
+				Values: [][]interface{}{
+					{
+						time.Date(1971, 1, 1, 0, 0, 20, 0, time.UTC),
+						96.49999999996908,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 22, 0, time.UTC),
+						93.46464646468584,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 24, 0, time.UTC),
+						95.00950095007724,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 26, 0, time.UTC),
+						92.99999999998636,
+					},
+					{
+						time.Date(1971, 1, 1, 0, 0, 28, 0, time.UTC),
+						90.99999999998545,
+					},
+				},
+			},
+		},
+	}
+
+	c := make(chan bool, 1)
+	go func() {
+		testBatcherWithOutput(t, "TestBatch_HttpPost_Timeout", script, 30*time.Second, er, false)
+		c <- true
+	}()
+	select {
+	case <-c:
+	case <-time.After(time.Second):
+		t.Fatal("Test timeout reached, httpPost().timeout() may not be functioning")
+	}
+}
+
+func TestBatch_AlertPost_Timeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ad := alert.Data{}
+		dec := json.NewDecoder(r.Body)
+		err := dec.Decode(&ad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
+	}))
+	defer ts.Close()
+	var script = `
+batch
+	|query('''
+		SELECT mean("value")
+		FROM "telegraf"."default".cpu_usage_idle
+		WHERE "host" = 'serverA' AND "cpu" != 'cpu-total'
+''')
+		.period(10s)
+		.every(10s)
+		.groupBy(time(2s), 'cpu')
+	|alert()
+		.crit(lambda:"mean" > 90)
+		.stateChangesOnly()
+		.levelField('level')
+		.details('')
+		.post('` + ts.URL + `').timeout(1ms)
+`
+
+	c := make(chan bool, 1)
+	go func() {
+		clock, et, replayErr, tm := testBatcher(t, "TestBatch_AlertPostTimeout", script)
+		defer tm.Close()
+
+		err := fastForwardTask(clock, et, replayErr, tm, 40*time.Second)
+		if err != nil {
+			t.Error(err)
+		}
+		c <- true
+	}()
+	select {
+	case <-c:
+	case <-time.After(time.Second):
+		t.Fatal("Test timeout reached, alert().post().timeout() may not be functioning")
+	}
+}
+
 // Helper test function for batcher
 func testBatcher(t *testing.T, name, script string) (clock.Setter, *kapacitor.ExecutingTask, <-chan error, *kapacitor.TaskMaster) {
 	if testing.Verbose() {
@@ -2335,12 +3160,14 @@ func testBatcher(t *testing.T, name, script string) (clock.Setter, *kapacitor.Ex
 	}
 
 	// Create a new execution env
-	tm := kapacitor.NewTaskMaster("testBatcher", logService)
+	d := diagService.NewKapacitorHandler()
+	tm := kapacitor.NewTaskMaster("testBatcher", newServerInfo(), d)
 	httpdService := newHTTPDService()
 	tm.HTTPDService = httpdService
 	tm.TaskStore = taskStore{}
 	tm.DeadmanService = deadman{}
-	as := alertservice.NewService(alertservice.NewConfig(), logService.NewLogger("[alert] ", log.LstdFlags))
+	tm.HTTPPostService, _ = httppost.NewService(nil, diagService.NewHTTPPostHandler())
+	as := alertservice.NewService(diagService.NewAlertServiceHandler())
 	as.StorageService = storagetest.New()
 	as.HTTPDService = httpdService
 	if err := as.Open(); err != nil {
@@ -2360,7 +3187,7 @@ func testBatcher(t *testing.T, name, script string) (clock.Setter, *kapacitor.Ex
 	var data io.ReadCloser
 	for i := 0; err == nil; {
 		f := fmt.Sprintf("%s.%d.brpl", name, i)
-		data, err = os.Open(path.Join("data", f))
+		data, err = os.Open(path.Join("testdata", f))
 		if err == nil {
 			allData = append(allData, data)
 			i++

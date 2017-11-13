@@ -1,11 +1,232 @@
 # Changelog
 
-## v1.2.1 [unreleased]
+## v1.4.0-rc1 [2017-11-09]
+
+### Features
+- [#1408](https://github.com/influxdata/kapacitor/issues/1408): Add Previous state
+- [#1575](https://github.com/influxdata/kapacitor/issues/1575): Add support to persist replay status after it finishes.
+- [#1461](https://github.com/influxdata/kapacitor/issues/1461): alert.post and https_post timeouts needed.
+- [#1413](https://github.com/influxdata/kapacitor/issues/1413): Add subscriptions modes to InfluxDB subscriptions.
+- [#1436](https://github.com/influxdata/kapacitor/issues/1436): Add linear fill support for QueryNode.
+- [#1345](https://github.com/influxdata/kapacitor/issues/1345): Add MQTT Alert Handler
+- [#1390](https://github.com/influxdata/kapacitor/issues/1390): Add built in functions to convert timestamps to integers
+- [#1425](https://github.com/influxdata/kapacitor/pull/1425): BREAKING: Change over internal API to use message passing semantics.
+    The breaking change is that the Combine and Flatten nodes previously, but erroneously, operated across batch boundaries; this has been fixed.
+- [#1497](https://github.com/influxdata/kapacitor/pull/1497): Add support for Docker Swarm autoscaling services.
+- [#1485](https://github.com/influxdata/kapacitor/issues/1485): Add bools field types to UDFs.
+- [#1549](https://github.com/influxdata/kapacitor/issues/1549): Add stateless now() function to get the current local time.
+- [#1545](https://github.com/influxdata/kapacitor/pull/1545): Add support for timeout, tags and service template in the Alerta AlertNode
+- [#1568](https://github.com/influxdata/kapacitor/issues/1568): Add support for custom HTTP Post bodies via a template system.
+- [#1569](https://github.com/influxdata/kapacitor/issues/1569): Add support for add the HTTP status code as a field when using httpPost
+- [#1535](https://github.com/influxdata/kapacitor/pull/1535): Add logfmt support and refactor logging.
+- [#1481](https://github.com/influxdata/kapacitor/pull/1481): Add ability to load tasks/handlers from dir.
+    TICKscript was extended to be able to describe a task exclusively through a tickscript.
+      * tasks no longer need to specify their TaskType (Batch, Stream).
+      * `dbrp` expressions were added to tickscript.
+    Topic-Handler file format was modified to include the TopicID and HandlerID in the file.
+    Load service was added; the service can load tasks/handlers from a directory.
+- [#1606](https://github.com/influxdata/kapacitor/pull/1606): Update Go version to 1.9.1
+- [#1578](https://github.com/influxdata/kapacitor/pull/1578): Add support for exposing logs via the API. API is released as a technical preview.
+- [#1605](https://github.com/influxdata/kapacitor/issues/1605): Add support for {{ .Duration }} on Alert Message property.
+- [#1644](https://github.com/influxdata/kapacitor/issues/1644): Add support for [JSON lines](https://en.wikipedia.org/wiki/JSON_Streaming#Line_delimited_JSON) for steaming HTTP logs.
+- [#1637](https://github.com/influxdata/kapacitor/issues/1637): Add new node Sideload, that allows loading data from files into the stream of data. Data can be loaded using a hierarchy.
+- [#1667](https://github.com/influxdata/kapacitor/pull/1667): Promote Alert API to stable v1 path.
+- [#1668](https://github.com/influxdata/kapacitor/pull/1668): Change WARN level logs to INFO level.
+
+### Bugfixes
+
+- [#916](https://github.com/influxdata/kapacitor/issues/916): Crash of Kapacitor on Windows x64 when starting a recording
+- [#1400](https://github.com/influxdata/kapacitor/issues/1400): Allow for `.yml` file extensions in `define-topic-handler`
+- [#1402](https://github.com/influxdata/kapacitor/pull/1402): Fix http server error logging.
+- [#1500](https://github.com/influxdata/kapacitor/pull/1500): Fix bugs with stopping running UDF agent.
+- [#1470](https://github.com/influxdata/kapacitor/pull/1470): Fix error messages for missing fields which are arguments to functions are not clear
+- [#1516](https://github.com/influxdata/kapacitor/pull/1516): Fix bad PagerDuty test the required server info.
+- [#1581](https://github.com/influxdata/kapacitor/pull/1581): Add SNMP sysUpTime to SNMP Trap service
+- [#1547](https://github.com/influxdata/kapacitor/issues/1547): Fix panic on recording replay with HTTPPostHandler.
+- [#1623](https://github.com/influxdata/kapacitor/issues/1623): Fix k8s incluster master api dns resolution
+- [#1630](https://github.com/influxdata/kapacitor/issues/1630): Remove the pidfile after the server has exited.
+- [#1641](https://github.com/influxdata/kapacitor/issues/1641): Logs API writes multiple http headers.
+- [#1657](https://github.com/influxdata/kapacitor/issues/1657): Fix missing dependency in rpm package.
+- [#1660](https://github.com/influxdata/kapacitor/pull/1660): Force tar owner/group to be root.
+- [#1663](https://github.com/influxdata/kapacitor/pull/1663): Fixed install/remove of kapacitor on non-systemd Debian/Ubuntu systems.
+    Fixes packaging to not enable services on RHEL systems.
+    Fixes issues with recusive symlinks on systemd systems.
+- [#1662](https://github.com/influxdata/kapacitor/issues/1662): Fix invalid default MQTT config.
+
+## v1.3.3 [2017-08-11]
+
+### Bugfixes
+- [#1520](https://github.com/influxdata/kapacitor/pull/1520): Expose pprof without authentication if enabled
+
+## v1.3.2 [2017-08-08]
+
+### Bugfixes
+- [#1512](https://github.com/influxdata/kapacitor/pull/1512): Use details field from alert node in PagerDuty.
+
+## v1.3.1 [2017-06-02]
+
+### Bugfixes
+
+- [#1415](https://github.com/influxdata/kapacitor/pull/1415): Proxy from environment for HTTP request to slack
+- [#1414](https://github.com/influxdata/kapacitor/pull/1414): Fix derivative node preserving fields from previous point in stream tasks.
+
+## v1.3.0 [2017-05-22]
 
 ### Release Notes
 
+The v1.3.0 release has two major features.
+
+1. Addition of scraping and discovering for Prometheus style data collection.
+2. Updates to the Alert Topic system
+
+Here is a quick example of how to configure Kapacitor to scrape discovered targets.
+First configure a discoverer, here we use the file-discovery discoverer.
+Next configure a scraper to use that discoverer.
+
+>NOTE: The scraping and discovering features are released under technical preview,
+meaning that the configuration or API around the feature may change in a future release.
+
+```
+# Configure file discoverer
+[[file-discovery]]
+ enabled = true
+ id = "discover_files"
+ refresh-interval = "10s"
+ ##### This will look for prometheus json files
+ ##### File format is here https://prometheus.io/docs/operating/configuration/#%3Cfile_sd_config%3E
+ files = ["/tmp/prom/*.json"]
+
+# Configure scraper
+[[scraper]]
+ enabled = true
+ name = "node_exporter"
+ discoverer-id = "discover_files"
+ discoverer-service = "file-discovery"
+ db = "prometheus"
+ rp = "autogen"
+ type = "prometheus"
+ scheme = "http"
+ metrics-path = "/metrics"
+ scrape-interval = "2s"
+ scrape-timeout = "10s"
+```
+
+Add the above snippet to your kapacitor.conf file.
+
+Create the below snippet as the file `/tmp/prom/localhost.json`:
+
+```
+[{
+ "targets": ["localhost:9100"]
+}]
+```
+
+Start the Prometheus node_exporter locally.
+
+Now startup Kapacitor and it will discover the `localhost:9100` node_exporter target and begin scrapping it for metrics.
+For more details on the scraping and discovery systems see the full documentation [here](https://docs.influxdata.com/kapacitor/v1.3/scraping).
+
+The second major feature with this release, are changes to the alert topic system.
+The previous release introduce this new system as a technical preview, with this release the alerting service has been simplified.
+Alert handlers now only ever have a single action and belong to a single topic.
+
+The handler definition has been simplified as a result.
+Here are some example alert handlers using the new structure:
+
+```yaml
+id: my_handler
+kind: pagerDuty
+options:
+  serviceKey: XXX
+```
+
+```yaml
+id: aggregate_by_1m
+kind: aggregate
+options:
+  interval: 1m
+  topic: aggregated
+```
+
+```yaml
+id: publish_to_system
+kind: publish
+options:
+  topics: [ system ]
+```
+
+To define a handler now you must specify which topic the handler belongs to.
+For example to define the above aggregate handler on the system topic use this command:
+
+```sh
+kapacitor define-handler system aggregate_by_1m.yaml
+```
+
+For more details on the alerting system see the full documentation [here](https://docs.influxdata.com/kapacitor/v1.3/alerts).
+
+# Bugfixes
+
+- [#1396](https://github.com/influxdata/kapacitor/pull/1396): Fix broken ENV var config overrides for the kubernetes section.
+- [#1397](https://github.com/influxdata/kapacitor/pull/1397): Update default configuration file to include sections for each discoverer service.
+
+## v1.3.0-rc4 [2017-05-19]
+
+# Bugfixes
+
+- [#1379](https://github.com/influxdata/kapacitor/issues/1379): Copy batch points slice before modification, fixes potential panics and data corruption.
+- [#1394](https://github.com/influxdata/kapacitor/pull/1394): Use the Prometheus metric name as the measurement name by default for scrape data.
+- [#1392](https://github.com/influxdata/kapacitor/pull/1392): Fix possible deadlock for scraper configuration updating.
+
+## v1.3.0-rc3 [2017-05-18]
+
+### Bugfixes
+
+- [#1369](https://github.com/influxdata/kapacitor/issues/1369): Fix panic with concurrent writes to same points in state tracking nodes.
+- [#1387](https://github.com/influxdata/kapacitor/pull/1387): static-discovery configuration simplified
+- [#1378](https://github.com/influxdata/kapacitor/issues/1378): Fix panic in InfluxQL node with missing field.
+
+## v1.3.0-rc2 [2017-05-11]
+
+### Bugfixes
+
+- [#1370](https://github.com/influxdata/kapacitor/issues/1370): Fix missing working_cardinality stats on stateDuration and stateCount nodes.
+
+## v1.3.0-rc1 [2017-05-08]
+
 ### Features
 
+- [#1299](https://github.com/influxdata/kapacitor/pull/1299): Allowing sensu handler to be specified
+- [#1284](https://github.com/influxdata/kapacitor/pull/1284): Add type signatures to Kapacitor functions.
+- [#1203](https://github.com/influxdata/kapacitor/issues/1203): Add `isPresent` operator for verifying whether a value is present (part of [#1284](https://github.com/influxdata/kapacitor/pull/1284)).
+- [#1354](https://github.com/influxdata/kapacitor/pull/1354): Add Kubernetes scraping support.
+- [#1359](https://github.com/influxdata/kapacitor/pull/1359): Add groupBy exclude and Add dropOriginalFieldName to flatten.
+- [#1360](https://github.com/influxdata/kapacitor/pull/1360): Add KapacitorLoopback node to be able to send data from a task back into Kapacitor.
+
+### Bugfixes
+
+- [#1329](https://github.com/influxdata/kapacitor/issues/1329): BREAKING: A bug was fixed around missing fields in the derivative node.
+    The behavior of the node changes slightly in order to provide a consistent fix to the bug.
+    The breaking change is that now, the time of the points returned are from the right hand or current point time, instead of the left hand or previous point time.
+- [#1353](https://github.com/influxdata/kapacitor/issues/1353): Fix panic in scraping TargetManager.
+- [#1238](https://github.com/influxdata/kapacitor/pull/1238): Use ProxyFromEnvironment for all outgoing HTTP traffic.
+
+## v1.3.0-beta2 [2017-05-01]
+
+### Features
+
+- [#117](https://github.com/influxdata/kapacitor/issues/117): Add headers to alert POST requests.
+
+### Bugfixes
+
+- [#1294](https://github.com/influxdata/kapacitor/issues/1294): Fix bug where batch queries would be missing all fields after the first nil field.
+- [#1343](https://github.com/influxdata/kapacitor/issues/1343): BREAKING: The UDF agent Go API has changed, the changes now make it so that the agent package is self contained.
+
+## v1.3.0-beta1 [2017-04-29]
+
+### Features
+
+- [#1322](https://github.com/influxdata/kapacitor/pull/1322): TLS configuration in Slack service for Mattermost compatibility
+- [#1330](https://github.com/influxdata/kapacitor/issues/1330): Generic HTTP Post node
 - [#1159](https://github.com/influxdata/kapacitor/pulls/1159): Go version 1.7.4 -> 1.7.5
 - [#1175](https://github.com/influxdata/kapacitor/pull/1175): BREAKING: Add generic error counters to every node type.
     Renamed `query_errors` to `errors` in batch node.
@@ -13,10 +234,21 @@
 - [#922](https://github.com/influxdata/kapacitor/issues/922): Expose server specific information in alert templates.
 - [#1162](https://github.com/influxdata/kapacitor/pulls/1162): Add Pushover integration.
 - [#1221](https://github.com/influxdata/kapacitor/pull/1221): Add `working_cardinality` stat to each node type that tracks the number of groups per node.
+- [#1211](https://github.com/influxdata/kapacitor/issues/1211): Add StateDuration node.
+- [#1209](https://github.com/influxdata/kapacitor/issues/1209): BREAKING: Refactor the Alerting service.
+    The change is completely breaking for the technical preview alerting service, a.k.a. the new alert topic handler features.
+    The change boils down to simplifying how you define and interact with topics.
+    Alert handlers now only ever have a single action and belong to a single topic.
+    An automatic migration from old to new handler definitions will be performed during startup.
+    See the updated API docs.
+- [#1286](https://github.com/influxdata/kapacitor/issues/1286): Default HipChat URL should be blank
+- [#507](https://github.com/influxdata/kapacitor/issues/507): Add API endpoint for performing Kapacitor database backups.
+- [#1132](https://github.com/influxdata/kapacitor/issues/1132): Adding source for sensu alert as parameter
+- [#1346](https://github.com/influxdata/kapacitor/pull/1346): Add discovery and scraping services.
 
 ### Bugfixes
 
-- [#1133](https://github.com/influxdata/kapacitor/issues/1133): Fix case-sensitivity for Telegram `parseMode` value. 
+- [#1133](https://github.com/influxdata/kapacitor/issues/1133): Fix case-sensitivity for Telegram `parseMode` value.
 - [#1147](https://github.com/influxdata/kapacitor/issues/1147): Fix pprof debug endpoint
 - [#1164](https://github.com/influxdata/kapacitor/pull/1164): Fix hang in config API to update a config section.
     Now if the service update process takes too long the request will timeout and return an error.
@@ -32,6 +264,20 @@
     Specifically in the JSON result data the old key `Series` is always `series`, and the old key `Err` is now always `error` instead of for only some of the outputs.
 - [#1181](https://github.com/influxdata/kapacitor/pull/1181): Fix bug parsing dbrp values with quotes.
 - [#1228](https://github.com/influxdata/kapacitor/pull/1228): Fix panic on loading replay files without a file extension.
+- [#1192](https://github.com/influxdata/kapacitor/issues/1192): Fix bug in Default Node not updating batch tags and groupID.
+    Also empty string on a tag value is now a sufficient condition for the default conditions to be applied.
+    See [#1233](https://github.com/influxdata/kapacitor/pull/1233) for more information.
+- [#1068](https://github.com/influxdata/kapacitor/issues/1068): Fix dot view syntax to use xlabels and not create invalid quotes.
+- [#1295](https://github.com/influxdata/kapacitor/issues/1295): Fix curruption of recordings list after deleting all recordings.
+- [#1237](https://github.com/influxdata/kapacitor/issues/1237): Fix missing "vars" key when listing tasks.
+- [#1271](https://github.com/influxdata/kapacitor/issues/1271): Fix bug where aggregates would not be able to change type.
+- [#1261](https://github.com/influxdata/kapacitor/issues/1261): Fix panic when the process cannot stat the data dir.
+
+## v1.2.1 [2017-04-13]
+
+### Bugfixes
+
+- [#1323](https://github.com/influxdata/kapacitor/pull/1323): Fix issue where credentials to InfluxDB could not be updated dynamically.
 
 ## v1.2.0 [2017-01-23]
 
